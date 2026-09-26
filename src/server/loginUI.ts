@@ -404,7 +404,7 @@ function saHistory(){
 // ---- Pull 采集页：对方服务地址可填（默认 127.0.0.1:8101，记入 localStorage），触发 /api/pull/run 并轮询状态 ----
 function renderPull(){
   if(POLL) clearInterval(POLL); POLL=null;
-  var host = localStorage.getItem('geo_pull_host') || 'http://127.0.0.1:8101';
+  var host = localStorage.getItem('geo_pull_host') || '';
   // 默认时间：今日 0:00:00 ~ 次日 0:00:00
   var _now = new Date();
   var _start = new Date(_now.getFullYear(), _now.getMonth(), _now.getDate(), 0, 0, 0);
@@ -461,6 +461,13 @@ function renderPull(){
       .then(function(j){ toast((j&&j.msg)||'已发送停止'); pullStatusTick(); });
   };
   $('#pull-refresh').onclick = pullStatusTick;
+  // localStorage 无值时，用服务端 GEO_PULL_HOST 填默认值
+  if(!host){
+    fetch('/api/config').then(function(r){return r.json();}).then(function(c){
+      var inp=$('#pull-host');
+      if(inp && !inp.value && c && c.pullHost){ inp.value=c.pullHost; }
+    }).catch(function(){});
+  }
   pullStatusTick();
   POLL = setInterval(pullStatusTick, 3000);
 }

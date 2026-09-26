@@ -563,6 +563,10 @@ app.get('/api/login/test/sessions', (_req, res) => {
   res.status(200).json({ sessions: listTestSessions() });
 });
 
+app.get('/api/config', (_req, res) => {
+  res.status(200).json({ pullHost: config.pullHost });
+});
+
 // 采集平台清单（信源分析页勾选用）：平台 modeId / 中文名 / 是否登录制
 app.get('/api/platforms', (_req, res) => {
   res.status(200).json({
