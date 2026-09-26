@@ -4,7 +4,7 @@
 # 用法：
 #   1. 进入 deploy 目录
 #   2. 用文本编辑器打开 geo-browser-env，按需修改（默认值已配好，一般直接跑）
-#   3. 运行：bash start.sh
+#   3. 运行：bash run.sh
 #
 # 前置：本机已安装 Node.js（>=18）、已安装系统 Chrome
 # 注意：变量一律用 ${VAR} 花括号形式——macOS bash 3.2 下 $VAR 紧跟中文会被误解析。
