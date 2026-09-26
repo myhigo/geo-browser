@@ -53,17 +53,28 @@ if [ ! -d node_modules ]; then
   npm install
 fi
 
-# 6) 启动（后台运行，日志落 deploy/geo-browser.log）
-nohup npm run serve > "${ROOT}/deploy/geo-browser.log" 2>&1 &
+# 6) 数据根目录（env 里的相对路径按项目根解析；与项目平级），日志放 <数据根>/logs/geo-browser.log
+DATA_ROOT="${GEO_DATA_ROOT:-../geo-browser-data}"
+case "${DATA_ROOT}" in
+  /*) ;;
+  *) DATA_ROOT="${ROOT}/${DATA_ROOT}" ;;
+esac
+DATA_ROOT="$(cd "${DATA_ROOT}" && pwd)"
+LOG_DIR="${DATA_ROOT}/logs"
+LOG_FILE="${LOG_DIR}/geo-browser.log"
 
-# 7) 等服务完全就绪（admin 可访问）再显示完成
+# 7) 启动（后台运行）
+mkdir -p "${LOG_DIR}"
+nohup npm run serve > "${LOG_FILE}" 2>&1 &
+
+# 8) 等服务完全就绪（admin 可访问）再显示完成
 ok=""
 for i in $(seq 1 60); do
   if curl -fsS "http://127.0.0.1:${PORT}/admin" >/dev/null 2>&1; then ok=1; break; fi
   sleep 2
 done
 if [ -z "${ok}" ]; then
-  echo "[错误] 服务在 120 秒内未就绪，请查看日志：deploy/geo-browser.log"
+  echo "[错误] 服务在 120 秒内未就绪，请查看日志：${LOG_FILE}"
   exit 1
 fi
 
