@@ -245,8 +245,8 @@ export class DeepseekAdapter implements PlatformAdapter {
     const sel = this.selectors.answerContainer.join(', ');
     const primary = await this.page
       .evaluate((s) => {
-        const el = document.querySelector(s);
-        return el ? (el.textContent || '').trim() || null : null;
+        const el = document.querySelector(s) as HTMLElement | null;
+        return el ? (el.innerText || '').trim() || null : null;
       }, sel)
       .catch(() => null);
     if (primary) return primary;
@@ -254,7 +254,7 @@ export class DeepseekAdapter implements PlatformAdapter {
       .evaluate(() => {
         const blocks = Array.from(document.querySelectorAll('[class*="ds-markdown"]')) as HTMLElement[];
         for (let i = blocks.length - 1; i >= 0; i--) {
-          const t = (blocks[i].textContent || '').trim();
+          const t = (blocks[i].innerText || '').trim();
           if (t.length >= 50) return t;
         }
         return null;
