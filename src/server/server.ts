@@ -21,6 +21,7 @@ import {
   confirmLogin,
   cancelLogin,
   resetStaleWaiting,
+  syncAccountLoginState,
   deleteAccount,
   listViews,
   loginBusy,
@@ -939,5 +940,8 @@ export async function startServer(): Promise<void> {
   // 清理服务重启后的 waiting 残留：内存登录会话已随进程丢失，waiting 账号无法再「验证登录」，
   // 统一重置为 none，避免账号卡在「登录窗口已打开，等待人工操作」无法手动清理
   await resetStaleWaiting();
+  // 校验各账号本地登录态并回写库：本地无 profile（换机/目录被删）→ status=none（未登录）
+  const { marked } = await syncAccountLoginState();
+  if (marked > 0) console.log(`[login] 启动校验：${marked} 个账号本地无登录信息，已标记需重新登录`);
   app.listen(PORT);
 }

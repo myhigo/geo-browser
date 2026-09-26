@@ -17,7 +17,7 @@ export type AccountStatus = 'none' | 'waiting' | 'active' | 'cooling' | 'failed'
 
 export interface Account {
   id: string; // = account_code（如 doubao-1）
-  /** 专属 profile 目录（绝对路径） */
+  /** 专属 profile 目录：由 account_code 派生（path.join(paths.profilesRoot, id)），不落库 */
   dir: string;
   remark?: string;
   /** 登录后抓取的账号昵称 */
@@ -49,9 +49,11 @@ export interface AccountRepo {
   remove(platformId: string, accountId: string): Promise<void>;
 }
 
-/** 账号 profile 目录：<profilesRoot>/<platform>-<seq> */
+/** 账号 profile 目录：由 account_code 派生，本机路径与代码/环境变量一致，换机后 GEO_DATA_ROOT 一致即正确 */
 export const profileDirOf = (platformId: string, seq: number): string =>
   path.join(paths.profilesRoot, `${platformId}-${seq}`);
+export const accountDirOf = (accountId: string): string =>
+  path.join(paths.profilesRoot, accountId);
 
 // ─────────────────────────── 文件实现 ───────────────────────────
 
@@ -63,7 +65,8 @@ const legacyStateFileOf = (platformId: string): string =>
 export class FileAccountRepo implements AccountRepo {
   async list(platformId: string): Promise<Account[]> {
     try {
-      return (JSON.parse(fs.readFileSync(ledgerFileOf(platformId), 'utf-8')) as Account[]).reverse();
+      return (JSON.parse(fs.readFileSync(ledgerFileOf(platformId), 'utf-8')) as Account[]).reverse()
+        .map((a) => ({ ...a, dir: accountDirOf(a.id) }));
     } catch {
       return this.migrateLegacy(platformId);
     }
@@ -84,7 +87,7 @@ export class FileAccountRepo implements AccountRepo {
       migrated = [
         {
           id: `${platformId}-1`,
-          dir: path.join(paths.profilesRoot, platformId), // 旧版目录就是平台名，保持不搬动
+          dir: accountDirOf(`${platformId}-1`),
           remark: '账号1',
           status: (['active', 'failed', 'cooling'].includes(old.status ?? '')
             ? old.status
@@ -143,10 +146,9 @@ export class FileAccountRepo implements AccountRepo {
 
 // ─────────────────────────── MySQL 实现 ───────────────────────────
 
-/** 上层字段 → 列名白名单（防注入：只认这些 key） */
+/** 上层字段 → 列名白名单（防注入：只认这些 key；dir 不落库，由 account_code 派生） */
 const FIELD_MAP: Record<string, string> = {
   id: 'account_code',
-  dir: 'profile_dir',
   remark: 'remark',
   nickname: 'nickname',
   status: 'status',
@@ -169,7 +171,7 @@ const NOTE_MAX = 500;
 const clipNote = (v: unknown): unknown =>
   typeof v === 'string' && v.length > NOTE_MAX ? v.slice(0, NOTE_MAX) : v;
 
-const SELECT_COLS = `account_code AS id, profile_dir AS dir, remark, nickname, status, note,
+const SELECT_COLS = `account_code AS id, remark, nickname, status, note,
   enabled,
   UNIX_TIMESTAMP(created_at) * 1000 AS createdAt,
   UNIX_TIMESTAMP(last_used_at) * 1000 AS lastUsedAt,
@@ -179,7 +181,6 @@ const SELECT_COLS = `account_code AS id, profile_dir AS dir, remark, nickname, s
 
 interface Row extends RowDataPacket {
   id: string;
-  dir: string;
   remark?: string | null;
   nickname?: string | null;
   status: AccountStatus;
@@ -198,7 +199,7 @@ interface Row extends RowDataPacket {
 
 const toAccount = (r: Row): Account => ({
   id: r.id,
-  dir: r.dir,
+  dir: accountDirOf(r.id),
   remark: r.remark ?? undefined,
   nickname: r.nickname ?? undefined,
   status: r.status,
@@ -269,9 +270,9 @@ export class MysqlAccountRepo implements AccountRepo {
   async add(platformId: string, account: Account): Promise<void> {
     await dbPool().query(
       `INSERT INTO geo_ui_platform_account
-         (node_id, platform_id, account_code, remark, nickname, status, note, profile_dir,
+         (node_id, platform_id, account_code, remark, nickname, status, note,
           today_queries, query_date, consecutive_fails, last_used_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FROM_UNIXTIME(? / 1000), NOW())`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FROM_UNIXTIME(? / 1000), NOW())`,
       [
         config.nodeId,
         platformId,
@@ -280,7 +281,6 @@ export class MysqlAccountRepo implements AccountRepo {
         account.nickname ?? null,
         account.status,
         clipNote(account.note) ?? null,
-        account.dir,
         account.todayQueries ?? 0,
         account.queryDate ?? null,
         account.consecutiveFails ?? 0,

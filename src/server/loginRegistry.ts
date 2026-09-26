@@ -11,7 +11,7 @@ import { chromium, BrowserContext } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import { resolvePlatform } from '../platforms/index.js';
-import { accountRepo, Account } from '../storage/accountRepo.js';
+import { accountRepo, Account, accountDirOf } from '../storage/accountRepo.js';
 import { proxyRepo, isDirectIp } from '../storage/proxyRepo.js';
 import { paths } from '../config/index.js';
 
@@ -100,7 +100,7 @@ export const LOGIN_DRIVERS: Record<string, PlatformLoginDriver> = {
   },
 };
 
-const dirOf = (platformId: string, seq: number): string => path.join(paths.profilesRoot, `${platformId}-${seq}`);
+const dirOf = (platformId: string, seq: number): string => accountDirOf(`${platformId}-${seq}`);
 const nextSeqOf = (platformId: string, accounts: Account[]): number => {
   let max = 0;
   for (const a of accounts) {
@@ -207,7 +207,13 @@ export interface ReadyCheck {
 /** 分配一个可用的已登录账号（只挑 active+enabled 且空闲；无可用 → 返回原因） */
 export async function allocateAccount(platformId: string): Promise<ReadyCheck> {
   const accounts = await accountRepo().list(platformId);
-  const usable = accounts.filter((a) => a.status === 'active' && a.enabled !== false && !isAccountBusy(a.id));
+  const usable = accounts.filter(
+    (a) =>
+      a.status === 'active' &&
+      a.enabled !== false &&
+      !isAccountBusy(a.id) &&
+      fs.existsSync(accountDirOf(a.id)) // 本地无 profile（换机/目录被删）→ 不可用
+  );
   if (usable.length === 0) {
     const any = accounts.some((a) => ['failed', 'cooling', 'none'].includes(a.status) || a.enabled === false);
     const label = LOGIN_DRIVERS[platformId]?.label ?? platformId;
@@ -629,6 +635,33 @@ export async function cancelLogin(platformId: string, accountId: string): Promis
 }
 
 /** 服务启动时清理 waiting 残留：内存登录会话随进程重启必然丢失，waiting 账号无法再「验证登录」，统一重置为 none。 */
+/**
+ * 启动后校验各账号本地登录态并回写数据库：
+ *  - 本地 profile 目录存在 → 维持原状态（active/cooling 视为已登录）；
+ *  - 本地无 profile（换机/目录被删）→ 库内 status 回写为 none（未登录，等同需重新登录），
+ *    避免「数据库标已登录、实际本地无登录信息」被挑号/采集误用。
+ */
+export async function syncAccountLoginState(): Promise<{ marked: number }> {
+  let marked = 0;
+  try {
+    for (const pid of Object.keys(LOGIN_DRIVERS)) {
+      const accounts = await accountRepo().list(pid);
+      for (const a of accounts) {
+        if (!fs.existsSync(accountDirOf(a.id))) {
+          if (a.status === 'active' || a.status === 'cooling') {
+            await accountRepo().patch(pid, a.id, { status: 'none' });
+            marked++;
+            console.warn(`[login] ${pid}/${a.id} 本地无 profile，重置为未登录`);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[login] 启动校验登录态失败（不阻断启动）：', e);
+  }
+  return { marked };
+}
+
 export async function resetStaleWaiting(): Promise<void> {
   try {
     for (const pid of Object.keys(LOGIN_DRIVERS)) {
