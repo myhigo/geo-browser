@@ -5,3 +5,6 @@ dist/
 /analysis/
 *.log
 /proxies.json
+
+# 本地部署配置（含真实凭据，勿提交）
+/deploy/geo-browser-env
