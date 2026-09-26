@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { YUANBAO_CANDIDATE_SELECTORS } from './selectors.js';
 import { firstFound } from '../../diagnostics/elementProbe.js';
+import { elementToText } from '../textExtract.js';
 import { humanClick } from '../../diagnostics/human.js';
 import { randWaitMs } from '../../tuning/delays.js';
 import { CandidateSelectors, PlatformAdapter, SourceInfo, ScreenshotMode } from '../../types.js';
@@ -368,7 +369,9 @@ export class YuanbaoAdapter implements PlatformAdapter {
   // 抽取回答正文；定位不到 → null。取最后一个助手气泡（最新回答），克隆后剔除噪音再读文本。
   async getAnswer(): Promise<string | null> {
     return this.page
-      .evaluate((sels: string[]) => {
+      .evaluate((arg: { sels: string[]; src: string }) => {
+        const { sels, src } = arg;
+        const toText = eval('(' + src + ')') as (n: Node) => string;
         let el: Element | null = null;
         for (const s of sels) {
           const nodes = document.querySelectorAll(s);
@@ -384,9 +387,9 @@ export class YuanbaoAdapter implements PlatformAdapter {
             'script, style, noscript, template, iframe, [class*="reference"], [class*="card_video"], [class*="video_note"]'
           )
           .forEach((n) => n.remove());
-        const txt = (clone.innerText || '').replace(/[ \t]+/g, ' ').trim();
+        const txt = toText(clone);
         return txt || null;
-      }, this.selectors.answerContainer)
+      }, { sels: this.selectors.answerContainer, src: elementToText.toString() })
       .catch(() => null);
   }
 

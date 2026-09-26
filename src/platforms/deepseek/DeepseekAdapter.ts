@@ -7,6 +7,7 @@ import fs from 'fs';
 import sharp from 'sharp';
 import { DEEPSEEK_CANDIDATE_SELECTORS } from './selectors.js';
 import { firstFound } from '../../diagnostics/elementProbe.js';
+import { elementToText } from '../textExtract.js';
 import { CandidateSelectors, PlatformAdapter, ScreenshotMode, SourceInfo } from '../../types.js';
 import {
   DEEPSEEK_INPUT_FOCUS_SETTLE,
@@ -244,21 +245,23 @@ export class DeepseekAdapter implements PlatformAdapter {
   async getAnswer(): Promise<string | null> {
     const sel = this.selectors.answerContainer.join(', ');
     const primary = await this.page
-      .evaluate((s) => {
-        const el = document.querySelector(s) as HTMLElement | null;
-        return el ? (el.innerText || '').trim() || null : null;
-      }, sel)
+      .evaluate((arg: { s: string; src: string }) => {
+        const toText = eval('(' + arg.src + ')') as (n: Node) => string;
+        const el = document.querySelector(arg.s) as HTMLElement | null;
+        return el ? toText(el) || null : null;
+      }, { s: sel, src: elementToText.toString() })
       .catch(() => null);
     if (primary) return primary;
     return this.page
-      .evaluate(() => {
+      .evaluate((src: string) => {
+        const toText = eval('(' + src + ')') as (n: Node) => string;
         const blocks = Array.from(document.querySelectorAll('[class*="ds-markdown"]')) as HTMLElement[];
         for (let i = blocks.length - 1; i >= 0; i--) {
-          const t = (blocks[i].innerText || '').trim();
+          const t = toText(blocks[i]);
           if (t.length >= 50) return t;
         }
         return null;
-      })
+      }, elementToText.toString())
       .catch(() => null);
   }
 

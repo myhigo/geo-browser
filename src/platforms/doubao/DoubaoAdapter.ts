@@ -3,6 +3,7 @@ import fs from 'fs';
 import sharp from 'sharp';
 import { DOUBAO_CANDIDATE_SELECTORS } from './selectors.js';
 import { firstFound } from '../../diagnostics/elementProbe.js';
+import { elementToText } from '../textExtract.js';
 import { CandidateSelectors, PlatformAdapter, ScreenshotMode, SourceInfo } from '../../types.js';
 import {
   DOUBAO_INPUT_FOCUS_AFTER,
@@ -350,24 +351,26 @@ export class DoubaoAdapter implements PlatformAdapter {
   async getAnswer(): Promise<string | null> {
     const sel = this.selectors.answerContainer.join(', ');
     const primary = await this.page
-      .evaluate((s) => {
-        const el = document.querySelector(s) as HTMLElement | null;
-        return el ? (el.innerText || '').trim() || null : null;
-      }, sel)
+      .evaluate((arg: { s: string; src: string }) => {
+        const toText = eval('(' + arg.src + ')') as (n: Node) => string;
+        const el = document.querySelector(arg.s) as HTMLElement | null;
+        return el ? toText(el) || null : null;
+      }, { s: sel, src: elementToText.toString() })
       .catch(() => null);
     if (primary) return primary;
     // 兜底（豆包 DOM 未定标前的临时策略）：取最后一个 ≥50 字的 markdown 渲染块。
     // 豆包回答走 markdown 渲染且位于问题之后 → 文档序最后一个即回答。
     // ⚠️ 拿到真实回答 DOM 样本（finished.html）定标 answerContainer 后应删除这段。
     return this.page
-      .evaluate(() => {
+      .evaluate((src: string) => {
+        const toText = eval('(' + src + ')') as (n: Node) => string;
         const blocks = Array.from(document.querySelectorAll('[class*="markdown"]')) as HTMLElement[];
         for (let i = blocks.length - 1; i >= 0; i--) {
-          const t = (blocks[i].innerText || '').trim();
+          const t = toText(blocks[i]);
           if (t.length >= 50) return t;
         }
         return null;
-      })
+      }, elementToText.toString())
       .catch(() => null);
   }
 

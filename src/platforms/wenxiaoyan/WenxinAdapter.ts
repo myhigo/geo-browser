@@ -2,6 +2,7 @@ import { Page, BrowserContext } from 'playwright';
 import fs from 'fs';
 import { WENXIN_CANDIDATE_SELECTORS } from './selectors.js';
 import { firstFound } from '../../diagnostics/elementProbe.js';
+import { elementToText } from '../textExtract.js';
 import { humanDelay } from '../../diagnostics/human.js';
 import { CandidateSelectors, PlatformAdapter, ScreenshotMode, SourceInfo } from '../../types.js';
 import {
@@ -353,7 +354,9 @@ export class WenxinAdapter implements PlatformAdapter {
   async getAnswer(): Promise<string | null> {
     const sel = '.chat-search-answer-generate, .answer-box';
     return this.page
-      .evaluate((s) => {
+      .evaluate((arg: { s: string; src: string }) => {
+        const { s, src } = arg;
+        const toText = eval('(' + src + ')') as (n: Node) => string;
         const el = document.querySelector(s);
         if (!el) return null;
         const clone = el.cloneNode(true) as HTMLElement;
@@ -362,9 +365,9 @@ export class WenxinAdapter implements PlatformAdapter {
             'script, style, noscript, template, iframe, [class*="reference-list"], [class*="reference-item"], [class*="shop-list"], [class*="shop-card"], [class*="question-closely"], [class*="thinking"], [class*="capsule"], [class*="footer"], [class*="feedback"]'
           )
           .forEach((n) => n.remove());
-        const txt = (clone.innerText || '').replace(/[ \t]+/g, ' ').trim();
+        const txt = toText(clone);
         return txt || null;
-      }, sel)
+      }, { s: sel, src: elementToText.toString() })
       .catch(() => null);
   }
 
