@@ -36,7 +36,7 @@ import {
 } from './loginRegistry.js';
 import { adminPageHtml } from './loginUI.js';
 import { config, paths, describeConfig } from '../config/index.js';
-import { accountRepo, Account, profileDirOf } from '../storage/accountRepo.js';
+import { accountRepo, Account, profileDirOf, accountDirOf } from '../storage/accountRepo.js';
 import { proxyRepo, splitProxyHost } from '../storage/proxyRepo.js';
 import { pingDb, releaseStaleLeases } from '../db/pool.js';
 import { identityRepo } from '../storage/identityRepo.js';
@@ -147,7 +147,8 @@ async function releaseIdentity(platform: string, loginRequired: boolean): Promis
 export async function execute(
   platform: string,
   keyword: string,
-  headed: boolean
+  headed: boolean,
+  accountId?: string
 ): Promise<{ screenshot: string; answer: string; sources: { title: string; url: string; siteName: string }[] }> {
   let userDataDir: string | undefined = path.join(paths.profilesRoot, platform);
   let waitLoginMs = 0;
@@ -161,11 +162,22 @@ export async function execute(
   const rotation = isLoginPlatform ? undefined : ROTATIONS[platform];
   const reactive = isLoginPlatform ? false : REACTIVE_RESET_PLATFORMS.has(platform);
   if (loginDriver?.loginRequired) {
-    const ready = await allocateAccount(platform);
-    if (!ready.ok) throw new ApiError(409, ready.reason ?? `${platform} 没有可用登录账号`);
-    ledgerAccountId = ready.accountId;
-    userDataDir = ready.dir;
-    waitLoginMs = 0;
+    if (accountId) {
+      // 调度器已挑好账号：直接用，跳过 allocateAccount（避免重复占用）
+      const acc = await accountRepo().get(platform, accountId);
+      if (!acc) throw new ApiError(404, `账号不存在：${accountId}`);
+      if (acc.status !== 'active' || acc.enabled === false) throw new ApiError(409, `账号 ${accountId} 不可用（status=${acc.status} enabled=${acc.enabled}）`);
+      if (!fs.existsSync(accountDirOf(accountId))) throw new ApiError(409, `账号 ${accountId} 本地无 profile`);
+      ledgerAccountId = accountId;
+      userDataDir = acc.dir;
+      waitLoginMs = 0;
+    } else {
+      const ready = await allocateAccount(platform);
+      if (!ready.ok) throw new ApiError(409, ready.reason ?? `${platform} 没有可用登录账号`);
+      ledgerAccountId = ready.accountId;
+      userDataDir = ready.dir;
+      waitLoginMs = 0;
+    }
   } else if (rotation) {
     await acquireIdentity(platform);
     userDataDir = rotation.dir;
@@ -391,7 +403,7 @@ app.post('/api/pull/run', (req, res) => {
   };
   console.log(`[${stamp()}] [pull] 触发：host=${host} headless=${!headed} platform=${forced ? forced.join(',') : 'auto(全部启用)'} startTime=${startTime ?? '-'} endTime=${endTime ?? '-'}`);
   // execute 自带平台身份策略（千问撞墙重生 / 文心轮换）；headed 由本轮请求决定
-  runPullRound(cfg, (platform, keyword) => execute(platform, keyword, headed), forced, (line) => console.log(line), pullSignal)
+  runPullRound(cfg, (platform, keyword, accountId) => execute(platform, keyword, headed, accountId), forced, (line) => console.log(line), pullSignal)
     .then((s) => {
       pullStatus.running = false;
       pullStatus.finishedAt = Date.now();

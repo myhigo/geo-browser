@@ -13,7 +13,7 @@ import path from 'path';
 import { resolvePlatform } from '../platforms/index.js';
 import { accountRepo, Account, accountDirOf } from '../storage/accountRepo.js';
 import { proxyRepo, isDirectIp } from '../storage/proxyRepo.js';
-import { paths } from '../config/index.js';
+import { paths, config } from '../config/index.js';
 
 /** 传给 Playwright 的代理选项（直连/不存在/未启用 → undefined 表示不注入） */
 export type ProxyOpts = { server: string; username?: string; password?: string };
@@ -214,6 +214,28 @@ export async function logoutAccount(platformId: string, accountId: string): Prom
 // ---------- 问答侧：挑号与回写 ----------
 const inFlight = new Set<string>(); // 正在使用的账号（防同号并发）
 
+/** (平台,IP) 冷却表：key = "platform:proxyId" → 冷却到期时间戳。调度 v2 防风控用。 */
+const coolMap = new Map<string, number>();
+const coolKey = (platform: string, proxyId: number | undefined): string => `${platform}:${proxyId ?? 'direct'}`;
+
+/** (平台,IP) 是否在冷却中 */
+export function isCooling(platform: string, proxyId: number | undefined): boolean {
+  const until = coolMap.get(coolKey(platform, proxyId));
+  return until !== undefined && until > Date.now();
+}
+
+/** (平台,IP) 冷却剩余秒数 */
+export function cooldownRemainingSec(platform: string, proxyId: number | undefined): number {
+  const until = coolMap.get(coolKey(platform, proxyId));
+  if (!until) return 0;
+  return Math.max(0, Math.ceil((until - Date.now()) / 1000));
+}
+
+/** 标记 (平台,IP) 进入冷却（账号使用完成后调用） */
+export function markCooldown(platform: string, proxyId: number | undefined): void {
+  coolMap.set(coolKey(platform, proxyId), Date.now() + config.platformIpIntervalSec * 1000);
+}
+
 function isAccountBusy(accountId: string): boolean {
   return inFlight.has(accountId);
 }
@@ -233,7 +255,8 @@ export async function allocateAccount(platformId: string): Promise<ReadyCheck> {
       a.status === 'active' &&
       a.enabled !== false &&
       !isAccountBusy(a.id) &&
-      fs.existsSync(accountDirOf(a.id)) // 本地无 profile（换机/目录被删）→ 不可用
+      fs.existsSync(accountDirOf(a.id)) && // 本地无 profile（换机/目录被删）→ 不可用
+      !isCooling(platformId, a.proxyId) // (平台,IP) 冷却中 → 不可用
   );
   if (usable.length === 0) {
     const any = accounts.some((a) => ['failed', 'cooling', 'none'].includes(a.status) || a.enabled === false);
@@ -267,6 +290,7 @@ export async function releaseAccount(platformId: string, accountId: string, succ
   inFlight.delete(accountId);
   const acc = await accountRepo().get(platformId, accountId);
   if (!acc) return;
+  markCooldown(platformId, acc.proxyId); // (平台,IP) 进入冷却（调度 v2 防风控）
   const patch: Partial<Account> = { lastUsedAt: Date.now() };
   if (loginRequired) {
     patch.status = 'failed';

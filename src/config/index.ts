@@ -90,6 +90,12 @@ export interface AppConfig {
   maxPerEgress: number;
   /** 代理 IP 冷却间隔（秒）：同一 IP 用完后需等待该时长才能再次被分配（默认 120） */
   ipIntervalSec: number;
+  /** (平台,IP) 冷却间隔（秒）：调度 v2 用，同平台同 IP 两次使用之间的最小间隔（默认 120） */
+  platformIpIntervalSec: number;
+  /** 调度扫描间隔（秒）：任务池每多久扫描一次 tryAcquire（默认 10） */
+  schedulerTickSec: number;
+  /** 浏览器槽位上限：0=自动取启用平台数（默认 0） */
+  maxSlots: number;
   /** 占用租约（毫秒）：IP/账号被占用超过该时长未释放（崩溃残留）即视为空闲，下次可直接使用（默认 5 分钟） */
   ipLeaseMs: number;
   /** 有状态数据的根目录；默认当前工作目录（保持与重构前一致） */
@@ -161,6 +167,9 @@ export const config: AppConfig = {
   maxBrowsers: num('GEO_MAX_BROWSERS', 4),
   maxPerEgress: num('GEO_MAX_PER_EGRESS', 1),
   ipIntervalSec: num('GEO_IP_INTERVAL', 120),
+  platformIpIntervalSec: num('GEO_PLATFORM_IP_INTERVAL', 120),
+  schedulerTickSec: num('GEO_SCHEDULER_TICK', 10),
+  maxSlots: num('GEO_MAX_SLOTS', 0),
   ipLeaseMs: 5 * 60 * 1000,
   dataRoot: env('GEO_DATA_ROOT') ?? '.',
   chromePath: env('GEO_CHROME_PATH'),
