@@ -333,6 +333,116 @@ const pullStatus = {
 /** pull 中断信号：运行中点「停止」置 aborted=true，runPullRound 在分页/逐词节点检测后中断 */
 let pullSignal: { aborted: boolean } | null = null;
 
+const pad2 = (n: number): string => String(n).padStart(2, '0');
+/** 本地日期 YYYY-MM-DD */
+const dateKey = (d: Date): string => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+
+/** 补 http:// 前缀，非法返回空串 */
+function normalizeHost(raw: string): string {
+  let host = raw.trim();
+  if (!host) return '';
+  if (!/^https?:\/\//i.test(host)) host = `http://${host}`;
+  try {
+    if (!new URL(host).hostname) return '';
+  } catch {
+    return '';
+  }
+  return host;
+}
+
+interface PullRoundOpts {
+  host: string;
+  /** 空=全部启用平台 */
+  forced?: string[];
+  startTime?: string;
+  endTime?: string;
+  headed: boolean;
+  source: 'manual' | 'daily';
+}
+
+/** 启动一轮 pull */
+function launchPullRound(o: PullRoundOpts): void {
+  pullStatus.running = true;
+  pullStatus.startedAt = Date.now();
+  pullStatus.finishedAt = 0;
+  pullStatus.pages = 0;
+  pullStatus.fetched = 0;
+  pullStatus.success = 0;
+  pullStatus.failed = 0;
+  pullStatus.reportFailed = 0;
+  pullStatus.lastError = '';
+  pullStatus.host = o.host;
+  pullStatus.stopping = false;
+  pullSignal = { aborted: false };
+  const cfg: PullConfig = { host: o.host, pageSize: 20, startTime: o.startTime, endTime: o.endTime };
+  const stamp = (): string => {
+    const d = new Date();
+    const p = (n: number): string => String(n).padStart(2, '0');
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  };
+  console.log(
+    `[${stamp()}] [pull] 触发（${o.source}）：host=${o.host} headless=${!o.headed} platform=${o.forced ? o.forced.join(',') : 'auto(全部启用)'} startTime=${o.startTime ?? '-'} endTime=${o.endTime ?? '-'}`
+  );
+  // execute 自带平台身份策略（千问撞墙重生 / 文心轮换）；headed 由本轮请求决定
+  runPullRound(cfg, (platform, keyword, accountId) => execute(platform, keyword, o.headed, accountId), o.forced, (line) => console.log(line), pullSignal)
+    .then((s) => {
+      pullStatus.running = false;
+      pullStatus.finishedAt = Date.now();
+      pullStatus.stopping = false;
+      pullSignal = null;
+      Object.assign(pullStatus, s);
+      console.log(`[${stamp()}] [pull] 轮次结束：${JSON.stringify(s)}`);
+    })
+    .catch((e: unknown) => {
+      pullStatus.running = false;
+      pullStatus.finishedAt = Date.now();
+      pullStatus.stopping = false;
+      pullSignal = null;
+      pullStatus.lastError = (e as Error).message || 'pull 轮次异常';
+      console.error('[pull] 轮次异常：', pullStatus.lastError);
+    });
+}
+
+/** 每日定时：到点跑一轮昨天的词 */
+function startDailyPull(): void {
+  const at = config.pullDailyAt;
+  if (!at) return;
+  const mm = /^(\d{1,2}):(\d{2})$/.exec(at);
+  const hh = mm ? Number(mm[1]) : NaN;
+  const mi = mm ? Number(mm[2]) : NaN;
+  if (!Number.isInteger(hh) || !Number.isInteger(mi) || hh > 23 || mi > 59) {
+    console.warn(`[daily] GEO_PULL_DAILY_AT 无效：${at}（应为 HH:mm），不启用每日定时`);
+    return;
+  }
+  console.log(`[daily] 每日定时已启用：每天 ${pad2(hh)}:${pad2(mi)} 检测前一天的数据`);
+  let firedDay = '';
+  setInterval(() => {
+    const now = new Date();
+    if (now.getHours() !== hh || now.getMinutes() !== mi) return;
+    const day = dateKey(now);
+    if (firedDay === day) return;
+    firedDay = day;
+    if (!envPullHost) {
+      console.log(`[daily] ${day} 到点，但未配置 GEO_PULL_HOST → 本轮跳过（不补偿）`);
+      return;
+    }
+    if (pullStatus.running) {
+      console.log(`[daily] ${day} 到点，但已有轮次在运行 → 本轮跳过（不补偿）`);
+      return;
+    }
+    const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const y0 = new Date(today0);
+    y0.setDate(y0.getDate() - 1);
+    launchPullRound({
+      host: normalizeHost(envPullHost) || envPullHost,
+      headed: false,
+      startTime: `${dateKey(y0)} 00:00:00`,
+      endTime: `${dateKey(today0)} 00:00:00`,
+      source: 'daily',
+    });
+  }, 30 * 1000);
+}
+
 // 手动触发一轮 pull：后台跑，202 立即返回；进度看 GET /api/pull/status 与服务日志
 app.post('/api/pull/run', (req, res) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
@@ -382,44 +492,8 @@ app.post('/api/pull/run', (req, res) => {
     return;
   }
   const headed = body.headed === true; // 默认无头；需要人工盯/首次登录等场景传 true
-  pullStatus.running = true;
-  pullStatus.startedAt = Date.now();
-  pullStatus.finishedAt = 0;
-  pullStatus.pages = 0;
-  pullStatus.fetched = 0;
-  pullStatus.success = 0;
-  pullStatus.failed = 0;
-  pullStatus.reportFailed = 0;
-  pullStatus.lastError = '';
-  pullStatus.host = host;
-  pullStatus.stopping = false;
-  pullSignal = { aborted: false };
   res.status(202).json({ msg: 'pull 轮次已开始，进度见 GET /api/pull/status 与服务日志' });
-  const cfg: PullConfig = { host, pageSize: 20, startTime, endTime };
-  const stamp = (): string => {
-    const d = new Date();
-    const p = (n: number): string => String(n).padStart(2, '0');
-    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-  };
-  console.log(`[${stamp()}] [pull] 触发：host=${host} headless=${!headed} platform=${forced ? forced.join(',') : 'auto(全部启用)'} startTime=${startTime ?? '-'} endTime=${endTime ?? '-'}`);
-  // execute 自带平台身份策略（千问撞墙重生 / 文心轮换）；headed 由本轮请求决定
-  runPullRound(cfg, (platform, keyword, accountId) => execute(platform, keyword, headed, accountId), forced, (line) => console.log(line), pullSignal)
-    .then((s) => {
-      pullStatus.running = false;
-      pullStatus.finishedAt = Date.now();
-      pullStatus.stopping = false;
-      pullSignal = null;
-      Object.assign(pullStatus, s);
-      console.log(`[${stamp()}] [pull] 轮次结束：${JSON.stringify(s)}`);
-    })
-    .catch((e: unknown) => {
-      pullStatus.running = false;
-      pullStatus.finishedAt = Date.now();
-      pullStatus.stopping = false;
-      pullSignal = null;
-      pullStatus.lastError = (e as Error).message || 'pull 轮次异常';
-      console.error('[pull] 轮次异常：', pullStatus.lastError);
-    });
+  launchPullRound({ host, forced, startTime, endTime, headed, source: 'manual' });
 });
 
 // 手动中断正在运行的 pull 轮次：置中断信号，runPullRound 在分页/逐词节点检测后停止（已在途的并发采集会跑完）
@@ -970,5 +1044,6 @@ export async function startServer(): Promise<void> {
   // 校验各账号本地登录态并回写库：本地无 profile（换机/目录被删）→ status=none（未登录）
   const { marked } = await syncAccountLoginState();
   if (marked > 0) console.log(`[login] 启动校验：${marked} 个账号本地无登录信息，已标记需重新登录`);
+  startDailyPull();
   app.listen(PORT);
 }

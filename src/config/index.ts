@@ -80,6 +80,8 @@ export interface AppConfig {
   timeoutMs: number;
   /** 对方服务地址（拉词/回推） */
   pullHost: string;
+  /** 每日检测时刻 HH:mm，留空=不启用 */
+  pullDailyAt: string;
   /** 产物是否落盘 */
   artifactMode: ArtifactMode;
   /** 采集是否无头（登录窗口恒为有头） */
@@ -162,6 +164,7 @@ export const config: AppConfig = {
   port: num('PORT', 8787),
   timeoutMs: num('GEO_TIMEOUT_MS', 3 * 60 * 1000),
   pullHost: env('GEO_PULL_HOST') ?? '',
+  pullDailyAt: env('GEO_PULL_DAILY_AT') ?? '',
   artifactMode: env('GEO_ARTIFACT_MODE') === 'debug' ? 'debug' : 'none',
   headless: bool('GEO_HEADLESS', true),
   maxBrowsers: num('GEO_MAX_BROWSERS', 4),
@@ -220,6 +223,7 @@ export function describeConfig(): string {
     `dataRoot=${path.resolve(config.dataRoot)}`,
   ];
   if (config.pullHost) bits.push(`pullHost=${config.pullHost}`);
+  if (config.pullDailyAt) bits.push(`每日定时=${config.pullDailyAt}`);
   if (config.ipIntervalSec !== 120) bits.push(`ipInterval=${config.ipIntervalSec}s`);
   return bits.join(' ');
 }

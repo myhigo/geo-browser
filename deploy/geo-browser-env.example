@@ -18,6 +18,9 @@ PORT=8787
 # 收录检测：对方服务地址（拉词/回推）。留空则需在页面手填
 GEO_PULL_HOST=http://127.0.0.1:8101
 
+# 每日执行时刻（HH:mm）：定时检测前一天的数据，留空=不启用
+GEO_PULL_DAILY_AT=10:00
+
 # 用系统 Chrome（本地版开）；容器版关
 GEO_USE_SYSTEM_CHROME=1
 
