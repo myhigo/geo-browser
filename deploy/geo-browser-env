@@ -9,8 +9,8 @@ GEO_STORAGE=file
 GEO_ARTIFACT_MODE=debug
 
 # 数据目录（账号 profile / 代理台账 / 截图 / 信源分析产物都放这里）。
-# 默认指向项目外的 ../geo-browser-data，避免数据混入项目目录被误提交到仓库；
-# 需要数据跟着项目走时改成 . （项目根，.gitignore 已忽略相关目录）
+# ../geo-browser-data：解析后=与项目 geo-browser 平级的 github/geo-browser-data，
+# 数据在项目目录之外、不进仓库；需要数据跟着项目走时改成 . （项目根，.gitignore 已忽略相关目录）
 GEO_DATA_ROOT=../geo-browser-data
 
 # 本机访问端口（改端口后重启生效）
@@ -23,6 +23,7 @@ GEO_USE_SYSTEM_CHROME=1
 GEO_MAX_BROWSERS=4
 
 # ===== MySQL 连接（仅 GEO_STORAGE=mysql 时需要）=====
+# ⚠️ 本文件会进 git 仓库（公开），不要填真实密码；本地要连库时在服务器上另存一份不提交的 env 填写。
 DB_HOST=127.0.0.1
 DB_PORT=3306
 DB_USER=root
