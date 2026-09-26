@@ -384,7 +384,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
             'script, style, noscript, template, iframe, [class*="reference"], [class*="card_video"], [class*="video_note"]'
           )
           .forEach((n) => n.remove());
-        const txt = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+        const txt = (clone.textContent || '').replace(/[ \t]+/g, ' ').trim();
         return txt || null;
       }, this.selectors.answerContainer)
       .catch(() => null);

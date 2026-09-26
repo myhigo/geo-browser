@@ -362,7 +362,7 @@ export class WenxinAdapter implements PlatformAdapter {
             'script, style, noscript, template, iframe, [class*="reference-list"], [class*="reference-item"], [class*="shop-list"], [class*="shop-card"], [class*="question-closely"], [class*="thinking"], [class*="capsule"], [class*="footer"], [class*="feedback"]'
           )
           .forEach((n) => n.remove());
-        const txt = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+        const txt = (clone.textContent || '').replace(/[ \t]+/g, ' ').trim();
         return txt || null;
       }, sel)
       .catch(() => null);
