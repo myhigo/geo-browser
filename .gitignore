@@ -1,0 +1,7 @@
+node_modules/
+dist/
+/diagnostics/
+/.profiles/
+/analysis/
+*.log
+/proxies.json

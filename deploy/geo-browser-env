@@ -1,0 +1,30 @@
+# ===== geo-browser 配置（本地 Chrome 版）=====
+# 部署包已配好默认值，一般无需修改；改动在下次启动时生效（启动脚本自动读取本文件）。
+# 用记事本/文本编辑器打开修改、保存即可。
+
+# 存储：file=本地 json 台账（默认，不连数据库）；mysql=写数据库（生产/多机，需配下方 DB_*）
+GEO_STORAGE=file
+
+# 产物落盘：debug=截图/页面存档落盘（目录见下方 GEO_DATA_ROOT）；none=不落盘
+GEO_ARTIFACT_MODE=debug
+
+# 数据目录（账号 profile / 代理台账 / 截图 / 信源分析产物都放这里）。
+# 默认指向项目外的 ../geo-browser-data，避免数据混入项目目录被误提交到仓库；
+# 需要数据跟着项目走时改成 . （项目根，.gitignore 已忽略相关目录）
+GEO_DATA_ROOT=../geo-browser-data
+
+# 本机访问端口（改端口后重启生效）
+PORT=8787
+
+# 是否用系统安装的 Chrome（本地版默认开；容器里应关闭走自带 chromium）
+GEO_USE_SYSTEM_CHROME=1
+
+# 同时打开浏览器的上限
+GEO_MAX_BROWSERS=4
+
+# ===== MySQL 连接（仅 GEO_STORAGE=mysql 时需要）=====
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=
+DB_NAME=geo
