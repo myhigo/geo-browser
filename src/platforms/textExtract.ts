@@ -44,8 +44,9 @@ export function elementToText(root: Node): string {
       continue;
     }
     if (tag === 'HR') {
+      // 只做段落分隔。不能输出 '---'：Markdown 中「文字 + 下一行 ---」是 Setext 标题，
+      // 会把上一行渲染成放大加粗的标题。
       if (out.length > 0 && !out.endsWith('\n')) out += '\n';
-      if (!out.endsWith('---\n')) out += '---\n';
       continue;
     }
 
