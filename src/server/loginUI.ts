@@ -19,12 +19,12 @@ export function adminPageHtml(): string {
   .menu-item { display: block; width: 100%; text-align: left; padding: 8px 12px; border: 0; border-radius: 6px; background: none; font-size: 13px; cursor: pointer; margin-bottom: 4px; color: #4e5969; }
   .menu-item:hover { background: #f2f3f5; }
   .menu-item.on { background: #e8f3ff; color: #165dff; font-weight: 500; }
-  main { flex: 1; padding: 24px 28px; max-width: 980px; }
+  main { flex: 1; padding: 24px 28px; }
   h2 { font-size: 16px; font-weight: 600; margin: 4px 0 14px; }
-  .acc { background: #fff; border: 1px solid #e5e6eb; border-radius: 10px; padding: 16px 20px; margin-bottom: 14px; }
-  .acc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; align-items: start; }
+  .acc { background: #fff; border: 1px solid #e5e6eb; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .acc-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; align-items: start; }
   .acc-grid > .acc { margin-bottom: 0; }
-  .acc-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .acc-top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; }
   .acc-id { font-size: 13px; color: #4e5969; font-family: ui-monospace, monospace; }
   .acc-remark { font-size: 14px; font-weight: 500; }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; }
@@ -33,8 +33,12 @@ export function adminPageHtml(): string {
   .meta { font-size: 12px; color: #86909c; margin-top: 8px; line-height: 1.8; }
   .meta b { color: #4e5969; font-weight: 500; }
   /* 账号卡片：标签左、值右。值列用 minmax(0,1fr) 保证长内容在列内换行而不撑破卡片 */
-  .acc-info { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; margin-top: 10px; font-size: 12px; align-items: baseline; }
+  .acc-info { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; margin-top: 0; font-size: 12px; align-items: baseline; }
   .acc-info b { color: #4e5969; font-weight: 500; word-break: break-all; }
+  .acc-stats { display: flex; align-items: baseline; gap: 12px; margin-top: 10px; font-size: 12px; flex-wrap: wrap; }
+  .acc-stats b { color: #4e5969; font-weight: 500; }
+  .acc-fail { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; font-size: 12px; }
+  .acc-fail b { color: #f53f3f; font-weight: 500; }
   .acc-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; flex-wrap: wrap; }
   /* 卡片最窄约 240px，下拉必须能收缩，否则会顶破卡片导致整片错行 */
   .acc-row .proxy-sel { flex: 1 1 auto; min-width: 0; max-width: 100%; }
@@ -51,7 +55,7 @@ export function adminPageHtml(): string {
   .plat-tab { background: #fff; border: 1px solid #c9cdd4; color: #4e5969; border-radius: 6px; padding: 6px 16px; font-size: 13px; cursor: pointer; }
   .plat-tab:hover { border-color: #165dff; color: #165dff; }
   .plat-tab.on { background: #e8f3ff; border-color: #165dff; color: #165dff; font-weight: 500; }
-  select.proxy-sel { padding: 5px 8px; border: 1px solid #c9cdd4; border-radius: 6px; font-size: 12px; color: #1f2329; background: #fff; max-width: 260px; }
+  select.proxy-sel { padding: 5px 8px; border: 1px solid #c9cdd4; border-radius: 6px; font-size: 12px; color: #1f2329; background: #fff; max-width: 100%; }
   select.proxy-sel:focus { outline: none; border-color: #165dff; }
   a.btn { display: inline-block; background: #fff; border: 1px solid #c9cdd4; color: #4e5969; border-radius: 6px; padding: 6px 14px; font-size: 13px; text-decoration: none; }
   a.btn:hover { border-color: #165dff; color: #165dff; }
@@ -145,18 +149,22 @@ function renderAccounts(){
     } else {
       accHtml = '<div class="acc-grid">';
       p.accounts.forEach(function(a){
-      var st = ST[a.status] || {t:a.status,c:'#c9cdd4'};
+      var st = ST[a.status] || ST.none;
       var off = a.enabled===false;
       accHtml += '<div class="acc"'+(off?' style="opacity:.55"':'')+'>'
+        // 第一行：备注
+        + '<div class="acc-info"><span class="k">备注</span><b>'+esc(a.remark||'-')+'</b></div>'
+        // 第二行：状态
         + '<div class="acc-top"><span class="dot" style="background:'+st.c+'"></span>'
         + '<span class="st-label">'+st.t+(a.busy?'（使用中）':'')+'</span>'
-        + '<span class="k">今日查询</span><b>'+(a.todayQueries==null?0:a.todayQueries)+'</b>'
-        + '<span class="k">最近使用</span><b>'+(a.lastUsedAt?fmtTime(a.lastUsedAt):'-')+'</b>'
-        + (a.consecutiveFails?'<span class="k">连续失败</span><b>'+a.consecutiveFails+'</b>':'')
-        + (off?'<span class="meta" style="margin:0;">已停用</span>':'')+'</div>';
-      // 备注单独一行并带标签，否则混在标题行里看不出是备注
-      accHtml += '<div class="acc-info"><span class="k">备注</span><b>'+esc(a.remark||'-')+'</b></div>';
-      accHtml += '<div class="acc-row"><span class="k">代理</span>'+proxySelHtml(a)+'</div>';
+        + (off?'<span class="st-label" style="color:#f53f3f;">已停用</span>':'')+'</div>'
+        // 第三行：今日查询、最近使用
+        + '<div class="acc-stats"><span class="k">今日查询</span><b>'+(a.todayQueries==null?0:a.todayQueries)+'</b>'
+        + '<span class="k">最近使用</span><b>'+(a.lastUsedAt?fmtTime(a.lastUsedAt):'-')+'</b></div>'
+        // 第四行：代理
+        + '<div class="acc-row"><span class="k">代理</span>'+proxySelHtml(a)+'</div>'
+        // 第五行：连续失败（有才显示）
+        + (a.consecutiveFails?'<div class="acc-fail"><span class="k">连续失败</span><b>'+a.consecutiveFails+'</b></div>':'');
       if(a.note) accHtml += '<div class="note">'+esc(a.note)+'</div>';
       // 第一行：主操作（登录/验证/取消登录 + 退出）
       accHtml += '<div class="btns">';
@@ -190,7 +198,7 @@ function renderAccounts(){
     // —— 外壳（账号列表区）——轮询只刷新 #acc-area 里的账号卡片；外壳仅在切平台时重建
     var key = 'acc|' + ACC_PLATFORM;
     if(PANEL_KEY !== key || !document.getElementById('acc-area')){
-      var shell = '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;"><h2>账号管理</h2><button class="primary" data-kind="acc-add">＋ 新增账号</button></div>'
+      var shell = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;"><h2>账号管理</h2><button class="primary" data-kind="acc-add">＋ 新增账号</button></div>'
         + '<div style="margin:10px 0;display:flex;gap:8px;flex-wrap:wrap;">' + plats.map(function(x){ return '<button class="plat-tab'+(x.platformId===ACC_PLATFORM?' on':'')+'" data-plat="'+x.platformId+'">'+x.label+'</button>'; }).join('') + '</div>';
       if(p.hint) shell += '<div class="hint">'+esc(p.hint)+'</div>';
       shell += '<div id="acc-area"></div>';

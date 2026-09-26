@@ -1,4 +1,5 @@
 import { Page, BrowserContext } from 'playwright';
+import { TextDecoder } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import { YUANBAO_CANDIDATE_SELECTORS } from './selectors.js';
@@ -11,6 +12,16 @@ import { CandidateSelectors, PlatformAdapter, SourceInfo, ScreenshotMode } from 
 // 其中 docs 数组含每条信源的 {index,docId,title,url,quote,...}。用 docId 定位对象、
 // brace-match 取出完整对象，再抽取 title/url（过滤元宝/腾讯系域名）。
 type RawRef = { title?: string; url: string; quote?: string };
+/** 还原 JSON 字符串字面量转义（\uXXXX / \" / \n 等） */
+function decodeJsonStr(escaped: string | undefined): string | undefined {
+  if (escaped == null) return escaped;
+  try {
+    const v = JSON.parse('"' + escaped.replace(/"/g, '\\"') + '"') as string;
+    return v;
+  } catch {
+    return escaped.replace(/\\"/g, '"').replace(/\\n/g, ' ').trim();
+  }
+}
 function extractRefsFromText(txt: string): RawRef[] {
   const out: RawRef[] = [];
   const re = /"docId"/g;
@@ -28,14 +39,14 @@ function extractRefsFromText(txt: string): RawRef[] {
     }
     if (depth !== 0) continue;
     const obj = txt.slice(start, j + 1);
-    const urlM = obj.match(/"url"\s*:\s*"(https?:\/\/[^"]+)"/);
+    const urlM = obj.match(/"url"\s*:\s*"(https?:\/\/[^"]*)"/);
     if (!urlM) continue;
-    const url = urlM[1];
+    const url = (decodeJsonStr(urlM[1]) ?? '').trim();
     if (/yuanbao\.tencent\.com|hunyuan\.tencent|tencent\.com|qq\.com/i.test(url)) continue;
     const tM = obj.match(/"title"\s*:\s*"((?:\\.|[^"\\])*)"/);
-    const title = tM ? tM[1].replace(/\\"/g, '"').replace(/\\n/g, ' ').trim() : undefined;
+    const title = tM ? (decodeJsonStr(tM[1]) ?? '').trim() : undefined;
     const qM = obj.match(/"quote"\s*:\s*"((?:\\.|[^"\\])*)"/);
-    const quote = qM ? qM[1].replace(/\\"/g, '"').replace(/\\n/g, ' ').trim() : undefined;
+    const quote = qM ? (decodeJsonStr(qM[1]) ?? '').trim() : undefined;
     out.push({ title, url, quote });
   }
   return out;
@@ -58,19 +69,42 @@ const CP1252_EXTRA: Record<number, number> = {
   0x02dc: 0x98, 0x2122: 0x99, 0x0161: 0x9a, 0x203a: 0x9b, 0x0153: 0x9c,
   0x017e: 0x9e, 0x0178: 0x9f,
 };
-function toCp1252Bytes(s: string): Buffer {
+/** 双编码回退：原始 UTF-8 字节被按 CP1252/latin1 解读成字符、再按 UTF-8 编码返回时，
+ *  把每个字符转回原始字节后按 UTF-8 解码。
+ *  ⚠️ 不能只查 CP1252 表：0x81/0x8D/0x8F/0x90/0x9D 等 CP1252 未定义字节必须按 latin1 原值回逆
+ *  （否则"理"=E7 90 86 的 0x90 会丢成 '?'）；œ„† 等扩展字符走 CP1252 映射。 */
+function fixMojibake(s: string): string {
   const out: number[] = [];
   for (const ch of s) {
     const cp = ch.codePointAt(0)!;
     if (cp < 0x80) out.push(cp);
     else if (CP1252_EXTRA[cp] !== undefined) out.push(CP1252_EXTRA[cp]);
-    else if (cp >= 0xa0 && cp <= 0xff) out.push(cp);
+    else if (cp <= 0xff) out.push(cp); // latin1 原值（含 CP1252 未定义的 0x81-0x9F 控制区）
     else out.push(0x3f); // fallback '?'
   }
-  return Buffer.from(out);
+  try { return Buffer.from(out).toString('utf-8'); } catch { return s; }
 }
-function fixMojibake(s: string): string {
-  try { return toCp1252Bytes(s).toString('utf-8'); } catch { return s; }
+function decodeBest(buf: Buffer): string {
+  const u8 = buf.toString('utf-8');
+  const cjkU8 = countCJK(u8);
+  const hasFFFD = u8.includes('\uFFFD');
+  if (!hasFFFD && cjkU8 > 0) return u8; // 干净 UTF-8
+  if (!hasFFFD) {
+    // 无中文：尝试 CP1252/latin1 双编码回退
+    const back = fixMojibake(u8);
+    if (countCJK(back) > 0) return back;
+    return u8;
+  }
+  // 有替换符：原始字节非 UTF-8，按 GBK 直接解码
+  try {
+    const gbk = new TextDecoder('gbk').decode(buf);
+    if (countCJK(gbk) > 0) return gbk;
+  } catch {
+    /* ignore */
+  }
+  const back = fixMojibake(u8);
+  if (countCJK(back) > 0) return back;
+  return u8;
 }
 function countCJK(s: string): number {
   return Array.from(s).filter((ch) => {
@@ -130,12 +164,10 @@ export class YuanbaoAdapter implements PlatformAdapter {
         .body()
         .then((buf) => {
           if (!buf) return;
-          // ⚠️ /api/chat/ 等响应存在双重编码：原始 UTF-8 被按 cp1252 解读成 str 后再按 UTF-8 编码
-          //   → mojibake（conversation/v1/detail 通常是干净 UTF-8）。
-          //   先按 UTF-8 解码，再做 cp1252 回退，选择 CJK 字符更多的版本。
-          const rawUtf8 = buf.toString('utf-8');
-          const fixed = fixMojibake(rawUtf8);
-          const txt = countCJK(fixed) > countCJK(rawUtf8) ? fixed : rawUtf8;
+          // ⚠️ 元宝 /api/chat/ 等响应编码不统一：干净 UTF-8 / cp1252 双编码 / GBK 三种都可能。
+          //   从原始 Buffer 多候选解码（decodeBest：utf-8、cp1252 回退、gbk 择优），
+          //   避免先用 toString('utf-8') 把 GBK 字节破坏成 U+FFFD 导致无法恢复。
+          const txt = decodeBest(buf);
           const refs = extractRefsFromText(txt);
           if (!refs.length) return;
           if (isChat) this.chatRefs = mergeRefs(this.chatRefs, refs);

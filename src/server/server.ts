@@ -524,6 +524,8 @@ app.post('/api/source-analysis/open', (req, res) => {
 
 // ---------- 平台登录管理（页面 + 接口；账号级操作，id→dir 台账唯一映射防串） ----------
 app.get('/admin', (_req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.set('Pragma', 'no-cache');
   res.type('html').send(adminPageHtml());
 });
 
@@ -924,6 +926,15 @@ app.post('/api/login/:platform/test-close', (req, res) => {
   closeTestAccount(id, accountId)
     .then((r) => res.status(r.ok ? 200 : 400).json({ msg: r.msg }))
     .catch((e: unknown) => res.status(500).json({ msg: (e as Error).message }));
+});
+
+// /api/ 未匹配路由统一返回 JSON（Express 默认 404 是 HTML，前端解析会报错）
+app.use('/api', (_req, res) => {
+  res.status(404).json({ msg: '接口不存在' });
+});
+// /api/ 异常统一返回 JSON
+app.use('/api', (err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  res.status(500).json({ msg: err.message || '服务器内部错误' });
 });
 
 // 启动 API 服务

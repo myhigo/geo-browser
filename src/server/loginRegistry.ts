@@ -7,7 +7,7 @@
 //  - 不抽昵称（2026-09-23 用户定版）：登录态以「磁盘可还原」为准，页面只留备注。
 //  - 本地 Chrome 版：登录/测试窗口直接开本机系统 Chrome（channel:'chrome'），无 noVNC/iframe。
 
-import { chromium, BrowserContext } from 'playwright';
+import { chromium, BrowserContext, Page } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import { resolvePlatform } from '../platforms/index.js';
@@ -60,6 +60,13 @@ export interface PlatformLoginDriver {
   loginRequired: true;
   loginWaitMs?: number;
   hint?: string;
+  /** 登录凭证 cookie 特征（正则匹配 cookie 名）：有匹配 = 已登录。
+   *  注意：匿名追踪/会话 cookie（ttwid/bd_sso/csrf/ds_session 等）未登录时也存在，绝不能命中。 */
+  loginCookiePattern?: RegExp;
+  /** 登录凭证 localStorage 键：存在且值非空 = 已登录。
+   *  字符串 = 键存在且字符串值非空；{ key, jsonPath } = 键存在且 JSON.parse 后 jsonPath 字段值非空。
+   *  （DeepSeek 的 userToken 未登录时键也在，值是 {"value":null}，必须解析后看 value 字段） */
+  loginStorageKeys?: (string | { key: string; jsonPath?: string })[];
 }
 
 export const LOGIN_DRIVERS: Record<string, PlatformLoginDriver> = {
@@ -68,35 +75,49 @@ export const LOGIN_DRIVERS: Record<string, PlatformLoginDriver> = {
     label: '豆包',
     loginRequired: true,
     loginWaitMs: 6 * 60 * 1000,
-    hint: '请在自动打开的浏览器窗口完成登录（抖音扫码 / 手机验证码均可），完成后回到本页点击「我已登录完成，验证」。窗口标题对应左侧所选账号，别登错号。',
+    hint: '在自动打开的浏览器窗口完成登录，完成后点击「我已登录完成，验证」',
+    // 豆包（字节系）：登录态载体是 sessionid / sid_tt / uid_tt / sso_uid_tt 等。
+    // 未登录只有 ttwid/passport_csrf_token/bd_sso_hi3jfd/s_v_web_id 等匿名追踪，不命中。
+    loginCookiePattern: /sessionid|sid_tt|uid_tt|sso_uid_tt|passport_sso/i,
   },
   deepseek: {
     platformId: 'deepseek',
     label: 'DeepSeek',
     loginRequired: true,
     loginWaitMs: 6 * 60 * 1000,
-    hint: '请在自动打开的浏览器窗口完成登录（手机验证码 / 微信扫码均可），完成后回到本页点击「我已登录完成，验证」。窗口标题对应左侧所选账号，别登错号。',
+    hint: '在自动打开的浏览器窗口完成登录，完成后点击「我已登录完成，验证」',
+    // DeepSeek：登录凭证不在 cookie（ds_session_id/deepseek_session 未登录时也存在，不能作为判据），
+    // 在 localStorage 的 userToken，但未登录时键也在（{"value":null}）→ 必须解析 value 字段非空才算已登录
+    loginStorageKeys: [{ key: 'userToken', jsonPath: 'value' }],
   },
   qwen: {
     platformId: 'qwen',
     label: '千问',
     loginRequired: true,
     loginWaitMs: 6 * 60 * 1000,
-    hint: '请在自动打开的浏览器窗口完成登录（千问扫码 / 手机验证码均可），完成后回到本页点击「我已登录完成，验证」。窗口标题对应左侧所选账号，别登错号。',
+    hint: '在自动打开的浏览器窗口完成登录，完成后点击「我已登录完成，验证」',
+    // 千问（通义系）：登录凭证 cookie 是 tongyi_sso_ticket / tongyi_sso_ticket_hash（登录后实测，httpOnly 持久）。
+    // 未登录时不存在（未登录仅有 XSRF-TOKEN/cna/UM_distinctid 等匿名 cookie）。
+    loginCookiePattern: /tongyi_sso_ticket/i,
   },
   wenxiaoyan: {
     platformId: 'wenxiaoyan',
     label: '百度文心',
     loginRequired: true,
     loginWaitMs: 6 * 60 * 1000,
-    hint: '请在自动打开的浏览器窗口完成登录（百度账号扫码 / 手机号均可），完成后回到本页点击「我已登录完成，验证」。窗口标题对应左侧所选账号，别登错号。',
+    hint: '在自动打开的浏览器窗口完成登录，完成后点击「我已登录完成，验证」',
+    // 文心（百度系）：BDUSS/STOKEN/PTOKEN/UBID/passid（历史实测登录凭证）
+    loginCookiePattern: /bduss|stoken|ptoken|ubid|passid|login_ticket/i,
   },
   hunyuan: {
     platformId: 'hunyuan',
     label: '腾讯元宝',
     loginRequired: true,
     loginWaitMs: 6 * 60 * 1000,
-    hint: '请在自动打开的浏览器窗口完成登录（微信扫码 / 手机号均可），完成后回到本页点击「我已登录完成，验证」。窗口标题对应左侧所选账号，别登错号。',
+    hint: '在自动打开的浏览器窗口完成登录，完成后点击「我已登录完成，验证」',
+    // 元宝（腾讯系）：登录凭证 cookie 是 hy_token（httpOnly，登录后实测）+ hy_user 用户标识。
+    // 未登录仅有 _qimei_*/_ga 等匿名 cookie，不命中。
+    loginCookiePattern: /hy_token/i,
   },
 };
 
@@ -338,40 +359,21 @@ async function openProbe(
     const readySel = [...def.selectors.input, 'a:has-text("登录")', 'button:has-text("登录")'].join(', ');
     await page.waitForSelector(readySel, { timeout: 20000 }).catch(() => {});
     await page.waitForTimeout(1500);
-    // ⚠️ 等登录态真正生效：各平台 SPA 从持久化 cookie/localStorage 水合登录态需要时间，
-    //   初始会闪现「未登录」态（登录墙/遮罩）。若不等待，下面 checkLogin 会误判为未登录
-    //   （典型现象：可见窗口内已登录、无头重开却仍撞登录墙）。
-    //   文心：未登录遮罩 .chat-aside-user-mask.unlogin 消失。
-    //   有登录墙平台(DeepSeek/豆包/元宝)：登录墙元素(「登录」入口)消失、输入框出现 → checkLogin() 收敛为 false。
-    const adapter = def.create(page, context);
-    try {
-      await page.waitForFunction(
-        () => {
-          const m = document.querySelector('.chat-aside-user-mask.unlogin');
-          return !m || !(m as HTMLElement).offsetParent;
-        },
-        { timeout: 8000 },
-      );
-    } catch {
-      /* 非文心或超时 → 下面用 checkLogin 轮询兜底 */
-    }
-    // 通用水合轮询：等到 checkLogin() 返回 false（已登录/登录态水合完成），最多 HYDRATE_MS。
-    // 真未登录时 checkLogin 恒 true，轮询超时后继续，下面仍会按登录墙兜底失败（正确行为）。
+    // ✅ 登录态判定唯一依据 = 登录凭证（loginCredentialsOf：cookie 匹配 / localStorage 键有值）。
+    // 不依赖 DOM 遮挡/输入框（有的平台没有遮罩，元素判定不可靠；用户 2026-09-26 定）。
+    // 持久化 cookie 在 launchPersistentContext 时已从磁盘加载；localStorage 随目录持久化，
+    // 无头重开同一目录即可读到。真登录 → 非空 → 已登录；未登录 → 空 → 未登录。
+    // 轮询上限：等待磁盘凭证稳定可读（localStorage 在页面加载后才有，需等 SPA 水合）。
     const HYDRATE_MS = 12000;
     const t0 = Date.now();
-    while (Date.now() - t0 < HYDRATE_MS) {
-      let loggedIn = false;
-      try {
-        loggedIn = !(await adapter.checkLogin());
-      } catch {
-        loggedIn = false;
-      }
-      if (loggedIn) break;
+    let creds = await loginCredentialsOf(context, page, platformId);
+    while (creds.cookies.length === 0 && creds.storageKeys.length === 0 && Date.now() - t0 < HYDRATE_MS) {
       await page.waitForTimeout(500);
+      creds = await loginCredentialsOf(context, page, platformId);
     }
-    const loginRequired = await adapter.checkLogin();
+    const loginRequired = creds.cookies.length === 0 && creds.storageKeys.length === 0;
     if (loginRequired) {
-      // 诊断落盘：窗口内已登录但无头重开仍撞墙时，据此排查水合/持久化问题
+      // 诊断落盘：无头重开未读到登录凭证 cookie 时，dump 现场排查（cookie 名/localStorage）
       try {
         fs.mkdirSync(paths.diagnosticsRoot, { recursive: true });
         const ts = Date.now();
@@ -409,6 +411,70 @@ async function openProbe(
   }
 }
 
+/** 判定登录凭证是否存在（唯一依据）：cookie 匹配 或 localStorage 键有值，任一命中 = 已登录。
+ * 不依赖 DOM 遮挡（有的平台没有遮罩，元素判定不可靠）。
+ * 注意：cookie 特征只匹配「登录后才有」的凭证 cookie；匿名/会话 cookie 未登录时也存在，不能命中。 */
+export async function loginCredentialsOf(
+  context: BrowserContext,
+  page: Page | undefined,
+  platformId: string
+): Promise<{ cookies: { name: string; domain: string; expires: number }[]; storageKeys: string[] }> {
+  const driver = LOGIN_DRIVERS[platformId];
+  const result: { cookies: { name: string; domain: string; expires: number }[]; storageKeys: string[] } = {
+    cookies: [],
+    storageKeys: [],
+  };
+  try {
+    if (driver?.loginCookiePattern) {
+      const cookies = await context.cookies().catch(() => []);
+      result.cookies = cookies
+        .filter((c) => driver.loginCookiePattern!.test(c.name))
+        .map((c) => ({ name: c.name, domain: c.domain, expires: c.expires }));
+    }
+  } catch {
+    /* cookie 读取失败不影响 storage 判定 */
+  }
+  try {
+    if (driver?.loginStorageKeys?.length && page) {
+      result.storageKeys = await page
+        .evaluate((specs) => {
+          const hits: string[] = [];
+          for (const spec of specs) {
+            const key = typeof spec === 'string' ? spec : spec.key;
+            try {
+              const v = localStorage.getItem(key);
+              if (v == null) continue;
+              if (typeof spec === 'string') {
+                if (v.trim().length > 0) hits.push(key);
+              } else {
+                let parsed: unknown = v;
+                if (spec.jsonPath) {
+                  try {
+                    parsed = JSON.parse(v);
+                    for (const part of spec.jsonPath.split('.')) {
+                      if (parsed == null) break;
+                      parsed = (parsed as Record<string, unknown>)[part];
+                    }
+                  } catch {
+                    parsed = null;
+                  }
+                }
+                if (parsed != null && String(parsed).trim().length > 0) hits.push(key);
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+          return hits;
+        }, driver.loginStorageKeys as (string | { key: string; jsonPath?: string })[])
+        .catch(() => []);
+    }
+  } catch {
+    /* storage 读取失败不影响 cookie 判定 */
+  }
+  return result;
+}
+
 /** 登录后校验：无头重开同一目录，未撞登录墙且可提问 → ok（不抽昵称；2026-09-23 按用户要求简化） */
 async function verifySession(
   platformId: string,
@@ -417,7 +483,7 @@ async function verifySession(
 ): Promise<{ ok: boolean; note?: string }> {
   const p = await openProbe(platformId, dir, proxy);
   if (!p.ok) return { ok: false, note: p.error };
-  if (p.loginRequired) return { ok: false, note: '登录态校验未通过：仍检测到登录墙/无输入框' };
+  if (p.loginRequired) return { ok: false, note: '未获取到登录凭证 cookie' };
   return { ok: true };
 }
 
@@ -487,11 +553,16 @@ export async function startLogin(
       const page = context.pages()[0];
       const def = resolvePlatform(platformId);
       await page.goto(def.defaultUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-      const waited = await Promise.race([
-        confirm.then(() => true),
-        new Promise<boolean>((r) => setTimeout(() => r(false), waitMs)),
+      // 区分三种结果：确认（true）→ 校验登录态；取消（false）→ 直接收尾不回写（cancelLogin 已置 none）；
+      // 超时 → 标记 failed。绝不能用 .then(() => true) 把取消误当成完成（会导致 active 覆盖 none）。
+      const result = await Promise.race([
+        confirm.then((v) => (v ? 'confirm' : 'cancel')),
+        new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), waitMs)),
       ]);
-      done = waited;
+      done = result === 'confirm';
+      if (result === 'cancel') {
+        return; // 取消登录：cancelLogin 已把状态置 none，这里不再回写任何状态
+      }
     } catch (e) {
       await accountRepo().patch(platformId, acc.id, { status: 'failed', note: `登录窗口异常：${(e as Error).message}` });
     } finally {
@@ -517,10 +588,10 @@ export async function startLogin(
           consecutiveFails: 0,
         });
       } else {
-        // 磁盘还原失败 → 登录态未真正持久化，明确标 failed，绝不凭窗口画面标 active
+        // 无头探测未通过 → 未登录（用户语义：需重新登录 = 未登录，不新增 failed 状态）
         await accountRepo().patch(platformId, acc.id, {
-          status: 'failed',
-          note: `登录态未持久化到磁盘（窗口内已登录但无头重开仍是登录墙）：${v.note ?? ''}`,
+          status: 'none',
+          note: `登录态校验未通过：${v.note ?? ''}`,
         });
       }
     } else {
@@ -542,16 +613,23 @@ export async function confirmLogin(platformId: string, accountId: string): Promi
   try {
     const pg = activeLogin.context.pages()[0];
     if (pg) {
-      // 等 SPA 水合登录态（文心初始会闪未登录遮罩 chat-aside-user-mask.unlogin）
-      await pg
-        .waitForFunction(
-          () => {
-            const m = document.querySelector('.chat-aside-user-mask.unlogin');
-            return !m || !(m as HTMLElement).offsetParent;
-          },
-          { timeout: 15000 },
-        )
-        .catch(() => {});
+      // 窗口内真实登录态判定（不弹提示框）：唯一依据 = 窗口内能否读到登录凭证（cookie/localStorage）。
+      // 已登录才重种 cookie 落盘；未登录 → 不重种（重种匿名 cookie 会把无登录态误持久化，
+      // 导致无头重开被误判已登录），由收尾 verifySession 无头探测做最终裁决，未通过回写 none。
+      let windowLoggedIn = false;
+      try {
+        const creds = await loginCredentialsOf(pg.context(), pg, platformId);
+        windowLoggedIn = creds.cookies.length > 0 || creds.storageKeys.length > 0;
+        if (!windowLoggedIn) {
+          console.log(
+            `[confirmLogin] ${platformId}/${accountId} 窗口内未读到登录凭证（cookie ${creds.cookies.length} / storage ${creds.storageKeys.length}），判定未登录`
+          );
+        }
+      } catch {
+        windowLoggedIn = false;
+      }
+      // 等页面稳定（诊断用 html 落盘前页面已渲染）
+      await pg.waitForTimeout(1500).catch(() => {});
       const html = await pg.content().catch(() => '');
       if (html) {
         try {
@@ -581,33 +659,34 @@ export async function confirmLogin(platformId: string, accountId: string): Promi
       } catch {
         /* 诊断落盘失败不影响登录 */
       }
-      // 🍪 会话级登录 cookie 转持久（2026-09-07 文心微信登录实测：BDUSS/STOKEN/PTOKEN 全为
-      // expires=-1 的 session cookie）。session cookie 在 context.close()（浏览器关闭）后被 Chrome
-      // 丢弃 → 磁盘目录永无登录态 → 后续 execute 打开该目录永远未登录（"登录了却没用上"）。
-      // 必须在窗口关闭前重种带 expires 的版本，让其真正落盘。
-      try {
-        const ctx = pg.context();
-        const sess = (await ctx.cookies().catch(() => []))
-          // 泛化：所有 expires<=0 的会话级 cookie 都重种为持久，不只文心 BDUSS 系。
-          // DeepSeek 的 ds_session_id / HWWAFSESID 等同样是 session cookie，关窗即丢；
-          // 不持久化会导致无头重开时登录态失效。
-          .filter((c) => c.expires <= 0)
-          .map((c) => ({
-            name: c.name,
-            value: c.value,
-            domain: c.domain,
-            path: c.path || '/',
-            httpOnly: c.httpOnly,
-            secure: c.secure,
-            sameSite: c.sameSite as 'Strict' | 'Lax' | 'None',
-            expires: Math.floor(Date.now() / 1000) + 365 * 24 * 3600, // 365 天
-          }));
-        if (sess.length > 0) {
-          await ctx.addCookies(sess).catch(() => {});
-          console.log(`🍪 已把 ${sess.length} 个会话级登录 cookie（${sess.map((c) => c.name).join('/')}）转为 365 天持久，防止关闭窗口后丢失`);
+      // 🍪 会话级登录 cookie 转持久：仅在窗口内判定已登录时执行。
+      // 未登录时窗口里只有匿名 cookie（ttwid/csrf/bd_sso 追踪等），一旦重种持久化，
+      // 无头重开会误认为"已有会话"不弹登录墙 → verifySession 误判已登录。
+      // 因此未登录（windowLoggedIn=false）一律不重种，交给收尾探测裁决。
+      if (windowLoggedIn) {
+        try {
+          const ctx = pg.context();
+          const sess = (await ctx.cookies().catch(() => []))
+            .filter((c) => c.expires <= 0)
+            .map((c) => ({
+              name: c.name,
+              value: c.value,
+              domain: c.domain,
+              path: c.path || '/',
+              httpOnly: c.httpOnly,
+              secure: c.secure,
+              sameSite: c.sameSite as 'Strict' | 'Lax' | 'None',
+              expires: Math.floor(Date.now() / 1000) + 365 * 24 * 3600, // 365 天
+            }));
+          if (sess.length > 0) {
+            await ctx.addCookies(sess).catch(() => {});
+            console.log(`🍪 已把 ${sess.length} 个会话级登录 cookie（${sess.map((c) => c.name).join('/')}）转为 365 天持久，防止关闭窗口后丢失`);
+          }
+        } catch {
+          /* 持久化失败：登录仍完成，但下次打开可能未登录 */
         }
-      } catch {
-        /* 持久化失败：登录仍完成，但下次打开可能未登录 */
+      } else {
+        console.log(`[confirmLogin] ${platformId}/${accountId} 窗口内未检测到登录态，不重种 cookie，交由收尾探测裁决`);
       }
     }
   } catch {
