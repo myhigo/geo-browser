@@ -641,6 +641,33 @@ app.get('/api/config', (_req, res) => {
   res.status(200).json({ pullHost: config.pullHost });
 });
 
+// 服务日志尾部：只回读末尾 2MB 再切行，避免大文件整份进内存
+const LOG_MAX_READ = 2 * 1024 * 1024;
+app.get('/api/logs', (req, res) => {
+  const raw = Number(req.query.lines);
+  const lines = Number.isFinite(raw) && raw > 0 ? Math.min(Math.floor(raw), 5000) : 300;
+  const file = paths.logFile;
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(file);
+  } catch {
+    res.status(404).json({ msg: `日志文件不存在：${file}` });
+    return;
+  }
+  const start = Math.max(0, st.size - LOG_MAX_READ);
+  const buf = Buffer.alloc(st.size - start);
+  const fd = fs.openSync(file, 'r');
+  try {
+    fs.readSync(fd, buf, 0, buf.length, start);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const arr = buf.toString('utf-8').split('\n');
+  if (start > 0) arr.shift(); // 从中间切开，首行必然残缺
+  if (arr.length && arr[arr.length - 1] === '') arr.pop();
+  res.status(200).json({ path: file, size: st.size, truncated: start > 0, lines: arr.slice(-lines) });
+});
+
 // 采集平台清单（信源分析页勾选用）：平台 modeId / 中文名 / 是否登录制
 app.get('/api/platforms', (_req, res) => {
   res.status(200).json({

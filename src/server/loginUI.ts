@@ -99,7 +99,8 @@ function menu(platforms){
     {id:'__proxies', label:'代理管理'},
     {id:'__accounts', label:'账号管理'},
     {id:'__sources', label:'信源分析'},
-    {id:'__pull', label:'收录检测'}
+    {id:'__pull', label:'收录检测'},
+    {id:'__logs', label:'运行日志'}
   ];
   $('#menu').innerHTML = items.map(function(it){ return '<button class="menu-item'+(CUR===it.id?' on':'')+'" data-id="'+it.id+'">'+it.label+'</button>'; }).join('');
   Array.prototype.forEach.call(document.querySelectorAll('.menu-item'), function(b){ b.onclick=function(){ CUR=b.dataset.id; menu(platforms); render(); }; });
@@ -108,6 +109,7 @@ function render(){
   if(TESTPOLL){ clearInterval(TESTPOLL); TESTPOLL=null; }
   if(CUR==='__proxies'){ renderProxies(); return; }
   if(CUR==='__pull'){ renderPull(); return; }
+  if(CUR==='__logs'){ renderLogs(); return; }
   if(CUR==='__sources'){ renderSources(); return; }
   if(CUR==='__accounts'){ renderAccounts(); return; }
   if(!CUR) return;
@@ -401,22 +403,20 @@ function saHistory(){
     });
   }).catch(function(){});
 }
-// ---- Pull 采集页：对方服务地址可填（默认 127.0.0.1:8101，记入 localStorage），触发 /api/pull/run 并轮询状态 ----
+// ---- Pull 采集页：触发 /api/pull/run 并轮询状态 ----
 function renderPull(){
   if(POLL) clearInterval(POLL); POLL=null;
-  var host = localStorage.getItem('geo_pull_host') || '';
-  // 默认时间：今日 0:00:00 ~ 次日 0:00:00
+  // 默认时间：昨天 0:00:00 ~ 今天 0:00:00
   var _now = new Date();
-  var _start = new Date(_now.getFullYear(), _now.getMonth(), _now.getDate(), 0, 0, 0);
-  var _end = new Date(_start.getTime() + 24*60*60*1000);
+  var _today0 = new Date(_now.getFullYear(), _now.getMonth(), _now.getDate(), 0, 0, 0);
+  var _start = new Date(_today0); _start.setDate(_start.getDate()-1);
+  var _end = _today0;
   function _pf(n){ return (n<10?'0':'')+n; }
   function _fmt(d){ return d.getFullYear()+'-'+_pf(d.getMonth()+1)+'-'+_pf(d.getDate())+' '+_pf(d.getHours())+':'+_pf(d.getMinutes())+':'+_pf(d.getSeconds()); }
   var defStart = _fmt(_start), defEnd = _fmt(_end);
   $('#panel').innerHTML =
     '<h2>收录检测</h2>'
-    + '<div class="acc"><div class="meta">服务地址</div>'
-    + '<div style="margin:10px 0;"><input id="pull-host" class="inp" style="width:100%;" value="'+esc(host)+'" placeholder="http://127.0.0.1:8101"></div>'
-    + '<div class="meta">可选参数</div>'
+    + '<div class="acc">'
     + '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0;">'
     + '<div class="meta">平台</div>'
     + '<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:6px 0 14px;">'
@@ -433,8 +433,7 @@ function renderPull(){
     + '</div>'
     + '</div>'
     + '<div class="btns"><button class="primary" id="pull-go" disabled>▶ 运行</button><button id="pull-stop" disabled>■ 停止</button><button id="pull-refresh">刷新状态</button></div>'
-    + '<div id="pull-status" class="meta" style="margin-top:12px;">加载状态…</div></div>'
-    + '<div class="hint">服务地址会作为 pullHost 传给 /api/pull/run（优先于服务端 GEO_PULL_HOST）；运行后后台执行，本页每 3s 自动刷新进度；详细日志看服务端控制台。「运行」需至少勾选一个平台；运行中可点「停止」中断。</div>';
+    + '<div id="pull-status" class="meta" style="margin-top:12px;">加载状态…</div></div>';
   // 平台勾选联动：未勾选任何平台时「运行」置灰
   function syncPullGo(){
     var any = document.querySelectorAll('input[name="pull-plat"]:checked').length > 0;
@@ -443,12 +442,9 @@ function renderPull(){
   Array.prototype.forEach.call(document.querySelectorAll('input[name="pull-plat"]'), function(c){ c.onchange = syncPullGo; });
   syncPullGo();
   $('#pull-go').onclick = function(){
-    var h = $('#pull-host').value.trim();
-    if(!h){ toast('请填对方服务地址'); return; }
     var plats = Array.prototype.slice.call(document.querySelectorAll('input[name="pull-plat"]:checked')).map(function(c){ return c.value; });
     if(!plats.length){ toast('请至少选择一个平台'); return; }
-    localStorage.setItem('geo_pull_host', h);
-    var payload = { pullHost: h, platforms: plats };
+    var payload = { platforms: plats };
     var s1 = $('#pull-start').value.trim(); if(s1) payload.startTime = s1;
     var s2 = $('#pull-end').value.trim(); if(s2) payload.endTime = s2;
     if($('#pull-headed').checked) payload.headed = true;
@@ -461,13 +457,6 @@ function renderPull(){
       .then(function(j){ toast((j&&j.msg)||'已发送停止'); pullStatusTick(); });
   };
   $('#pull-refresh').onclick = pullStatusTick;
-  // localStorage 无值时，用服务端 GEO_PULL_HOST 填默认值
-  if(!host){
-    fetch('/api/config').then(function(r){return r.json();}).then(function(c){
-      var inp=$('#pull-host');
-      if(inp && !inp.value && c && c.pullHost){ inp.value=c.pullHost; }
-    }).catch(function(){});
-  }
   pullStatusTick();
   POLL = setInterval(pullStatusTick, 3000);
 }
@@ -482,6 +471,50 @@ function pullStatusTick(){
         + (s.lastError ? '<div class="note">上次错误：'+esc(s.lastError)+'</div>' : '');
     var sb = $('#pull-stop'); if(sb) sb.disabled = !(s && s.running);
   }).catch(function(){});
+}
+
+// ---- 日志页：进入只加载一次，点「开始刷新」才起轮询 ----
+function renderLogs(){
+  if(POLL) clearInterval(POLL); POLL=null;
+  $('#panel').innerHTML =
+    '<h2>运行日志</h2>'
+    + '<div class="acc">'
+    + '<div class="meta" id="log-meta">加载中…</div>'
+    + '<div class="btns" style="margin:10px 0;">'
+    + '<button class="primary" id="log-start">▶ 开始刷新</button>'
+    + '<button id="log-stop" disabled>■ 停止刷新</button>'
+    + '<button id="log-refresh">立即刷新</button>'
+    + '</div>'
+    + '<pre id="log-body" style="margin:0;padding:12px;background:#f7f8fa;border-radius:6px;max-height:60vh;overflow:auto;font-size:12px;line-height:1.6;color:#1d2129;white-space:pre-wrap;word-break:break-all;">加载中…</pre>'
+    + '</div>';
+  function sizeOf(n){
+    if(n<1024) return n+' B';
+    if(n<1024*1024) return (n/1024).toFixed(1)+' KB';
+    return (n/1024/1024).toFixed(2)+' MB';
+  }
+  function paint(){
+    fetch('/api/logs?lines=300').then(function(r){ return r.json().catch(function(){ return {msg:'响应解析失败'}; }); }).then(function(j){
+      var body=$('#log-body'); if(!body) return;
+      if(!j || j.msg){ body.textContent=(j&&j.msg)||'读取失败'; return; }
+      $('#log-meta').textContent = j.path+' ｜ '+sizeOf(j.size)+' ｜ 末尾 '+j.lines.length+' 行'+(j.truncated?'（文件较大，仅读尾部 2MB）':'');
+      body.textContent = j.lines.join('\\n');
+      body.scrollTop = body.scrollHeight;
+    }).catch(function(e){ var b=$('#log-body'); if(b) b.textContent='读取失败：'+e.message; });
+  }
+  $('#log-start').onclick = function(){
+    if(POLL) return;
+    POLL = setInterval(paint, 3000);
+    this.disabled = true;
+    var sb=$('#log-stop'); if(sb) sb.disabled=false;
+    paint();
+  };
+  $('#log-stop').onclick = function(){
+    if(POLL){ clearInterval(POLL); POLL=null; }
+    var st=$('#log-start'); if(st) st.disabled=false;
+    this.disabled = true;
+  };
+  $('#log-refresh').onclick = paint;
+  paint();
 }
 
 // 事件委托：账号卡与顶部按钮统一走 data-kind / data-acc（避免内联 onclick 引号转义问题）

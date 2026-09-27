@@ -208,6 +208,10 @@ export const paths = {
   get proxiesFile(): string {
     return path.resolve(config.dataRoot, 'proxies.json');
   },
+  /** 服务日志（deploy/run.sh 重定向产出，路径需与其保持一致） */
+  get logFile(): string {
+    return path.resolve(config.dataRoot, 'logs/geo-browser.log');
+  },
 };
 
 /** 启动日志：只打印非默认的关键项，避免刷屏 */
