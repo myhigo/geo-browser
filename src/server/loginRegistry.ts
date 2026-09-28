@@ -290,7 +290,12 @@ export async function releaseAccount(platformId: string, accountId: string, succ
   inFlight.delete(accountId);
   const acc = await accountRepo().get(platformId, accountId);
   if (!acc) return;
-  markCooldown(platformId, acc.proxyId); // (平台,IP) 进入冷却（调度 v2 防风控）
+  // 动态代理下每次都是新 IP，冷却键 (平台,账号绑定的proxyId) 恒为同一个，冷却意义失效 → 跳过
+  if (config.dps.secretId) {
+    console.log(`[dps] 动态代理模式，跳过 (${platformId},proxy#${acc.proxyId ?? '-'}) 冷却`);
+  } else {
+    markCooldown(platformId, acc.proxyId); // (平台,IP) 进入冷却（调度 v2 防风控）
+  }
   const patch: Partial<Account> = { lastUsedAt: Date.now() };
   if (loginRequired) {
     patch.status = 'failed';

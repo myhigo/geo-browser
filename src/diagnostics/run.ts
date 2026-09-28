@@ -4,7 +4,8 @@ import path from 'path';
 import { resolvePlatform, PlatformDef } from '../platforms/index.js';
 import { probeElements } from './elementProbe.js';
 import { DiagnosticResult, ElementDiagnosisItem, SourceInfo, ScreenshotMode } from '../types.js';
-import { paths } from '../config/index.js';
+import { paths, config } from '../config/index.js';
+import { fetchDpsProxy } from '../proxy/dpsProxy.js';
 
 function ts(): string {
   const d = new Date();
@@ -81,6 +82,17 @@ export async function runDiagnostic(
   const url = opts.url || def.defaultUrl;
 
   const headless = opts.headless ?? process.env.GEO_HEADLESS === '1';
+  // 动态代理：配了 GEO_DPS_SECRET_ID 时，每次开浏览器都取一个新 IP；取不到则回退到传入的代理/直连
+  let proxy = opts.proxy;
+  if (config.dps.secretId) {
+    const dps = await fetchDpsProxy();
+    if (dps) {
+      proxy = dps;
+      console.log(`🌐 [dps] 本次使用动态代理：${dps.server}`);
+    } else {
+      console.log(`⚠️ [dps] 取动态代理失败，回退到${opts.proxy ? '账号绑定代理' : '直连'}`);
+    }
+  }
   const launchOpts: {
     headless: boolean;
     slowMo: number;
@@ -97,7 +109,7 @@ export async function runDiagnostic(
     args: ['--disable-blink-features=AutomationControlled'],
     // 去掉 Playwright 默认注入的 --enable-automation（会留下 cdc_ 钩子与 webdriver 标记）
     ignoreDefaultArgs: ['--enable-automation'],
-    ...(opts.proxy ? { proxy: opts.proxy } : {}),
+    ...(proxy ? { proxy } : {}),
   };
   if (opts.executablePath) {
     launchOpts.executablePath = opts.executablePath;

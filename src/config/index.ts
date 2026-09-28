@@ -66,6 +66,14 @@ export interface DbConfig {
   database: string;
 }
 
+/** 快代理私密代理凭据（secretId 为空 = 不启用动态代理） */
+export interface DpsConfig {
+  secretId: string;
+  secretKey: string;
+  username: string;
+  password: string;
+}
+
 export interface AppConfig {
   /** 本节点标识：账号归属哪台机器（多机时挑号只挑本节点的账号） */
   nodeId: string;
@@ -84,6 +92,8 @@ export interface AppConfig {
   pullDailyAt: string;
   /** 每日检测往前覆盖的天数：1=昨天，3=前三天 */
   pullDaysBack: number;
+  /** 快代理私密代理：配了 secretId 则每次开浏览器取新 IP */
+  dps: DpsConfig;
   /** 产物是否落盘 */
   artifactMode: ArtifactMode;
   /** 采集是否无头（登录窗口恒为有头） */
@@ -168,6 +178,12 @@ export const config: AppConfig = {
   pullHost: env('GEO_PULL_HOST') ?? '',
   pullDailyAt: env('GEO_PULL_DAILY_AT') ?? '',
   pullDaysBack: Math.max(1, Math.floor(num('GEO_PULL_DAYS_BACK', 1))) || 1,
+  dps: {
+    secretId: env('GEO_DPS_SECRET_ID') ?? '',
+    secretKey: env('GEO_DPS_SECRET_KEY') ?? '',
+    username: env('GEO_DPS_USERNAME') ?? '',
+    password: env('GEO_DPS_PASSWORD') ?? '',
+  },
   artifactMode: env('GEO_ARTIFACT_MODE') === 'debug' ? 'debug' : 'none',
   headless: bool('GEO_HEADLESS', true),
   maxBrowsers: num('GEO_MAX_BROWSERS', 4),
