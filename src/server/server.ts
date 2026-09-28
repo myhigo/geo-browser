@@ -414,7 +414,7 @@ function startDailyPull(): void {
     console.warn(`[daily] GEO_PULL_DAILY_AT 无效：${at}（应为 HH:mm），不启用每日定时`);
     return;
   }
-  console.log(`[daily] 每日定时已启用：每天 ${pad2(hh)}:${pad2(mi)} 检测前一天的数据`);
+  console.log(`[daily] 每日定时已启用：每天 ${pad2(hh)}:${pad2(mi)} 检测前 ${config.pullDaysBack} 天的数据`);
   let firedDay = '';
   setInterval(() => {
     const now = new Date();
@@ -431,12 +431,12 @@ function startDailyPull(): void {
       return;
     }
     const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const y0 = new Date(today0);
-    y0.setDate(y0.getDate() - 1);
+    const startDay = new Date(today0);
+    startDay.setDate(startDay.getDate() - config.pullDaysBack);
     launchPullRound({
       host: normalizeHost(envPullHost) || envPullHost,
       headed: false,
-      startTime: `${dateKey(y0)} 00:00:00`,
+      startTime: `${dateKey(startDay)} 00:00:00`,
       endTime: `${dateKey(today0)} 00:00:00`,
       source: 'daily',
     });
