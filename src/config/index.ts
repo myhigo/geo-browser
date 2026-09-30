@@ -74,6 +74,13 @@ export interface DpsConfig {
   password: string;
 }
 
+/** 隧道代理（固定地址出网，云端自动换 IP；server 为空 = 不启用） */
+export interface TunnelConfig {
+  server: string;
+  username: string;
+  password: string;
+}
+
 export interface AppConfig {
   /** 本节点标识：账号归属哪台机器（多机时挑号只挑本节点的账号） */
   nodeId: string;
@@ -94,6 +101,8 @@ export interface AppConfig {
   pullDaysBack: number;
   /** 快代理私密代理：配了 secretId 则每次开浏览器取新 IP */
   dps: DpsConfig;
+  /** 隧道代理：配了 server 则固定地址出网，云端自动换 IP（优先级高于 dps） */
+  tunnel: TunnelConfig;
   /** 产物是否落盘 */
   artifactMode: ArtifactMode;
   /** 采集是否无头（登录窗口恒为有头） */
@@ -183,6 +192,11 @@ export const config: AppConfig = {
     secretKey: env('GEO_DPS_SECRET_KEY') ?? '',
     username: env('GEO_DPS_USERNAME') ?? '',
     password: env('GEO_DPS_PASSWORD') ?? '',
+  },
+  tunnel: {
+    server: env('GEO_TUNNEL_SERVER') ?? '',
+    username: env('GEO_TUNNEL_USERNAME') ?? '',
+    password: env('GEO_TUNNEL_PASSWORD') ?? '',
   },
   artifactMode: env('GEO_ARTIFACT_MODE') === 'debug' ? 'debug' : 'none',
   headless: bool('GEO_HEADLESS', true),

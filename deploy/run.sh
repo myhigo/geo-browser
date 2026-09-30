@@ -59,6 +59,7 @@ case "${DATA_ROOT}" in
   /*) ;;
   *) DATA_ROOT="${ROOT}/${DATA_ROOT}" ;;
 esac
+mkdir -p "${DATA_ROOT}"
 DATA_ROOT="$(cd "${DATA_ROOT}" && pwd)"
 LOG_DIR="${DATA_ROOT}/logs"
 LOG_FILE="${LOG_DIR}/geo-browser.log"

@@ -82,9 +82,19 @@ export async function runDiagnostic(
   const url = opts.url || def.defaultUrl;
 
   const headless = opts.headless ?? process.env.GEO_HEADLESS === '1';
-  // 动态代理：配了 GEO_DPS_SECRET_ID 时，每次开浏览器都取一个新 IP；取不到则回退到传入的代理/直连
+  // 隧道代理：固定地址出网，云端自动换 IP，优先级最高
   let proxy = opts.proxy;
-  if (config.dps.secretId) {
+  if (config.tunnel.server) {
+    const server = /^https?:\/\/|^socks5:\/\//i.test(config.tunnel.server)
+      ? config.tunnel.server
+      : `http://${config.tunnel.server}`;
+    proxy = {
+      server,
+      ...(config.tunnel.username ? { username: config.tunnel.username } : {}),
+      ...(config.tunnel.password ? { password: config.tunnel.password } : {}),
+    };
+    console.log(`🌐 [tunnel] 本次使用隧道代理：${server}`);
+  } else if (config.dps.secretId) {
     const dps = await fetchDpsProxy();
     if (dps) {
       proxy = dps;
