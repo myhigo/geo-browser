@@ -47,6 +47,10 @@ GEO_SCHEDULER_TICK=10
 # 浏览器槽位上限（0=自动取启用平台数）
 GEO_MAX_SLOTS=0
 
+# ===== 代理 bypass（选配）=====
+# 直连、不走代理的域名（逗号分隔）：把静态资源甩给本机带宽，仅对话 API 走代理
+GEO_PROXY_BYPASS="lf-flow-web-cdn.doubao.com,p3-pc.douyinpic.com,p9-pc.douyinpic.com,sf16-va.tiktokcdn.com,fonts.googleapis.com,fonts.gstatic.com"
+
 # ===== MySQL（仅 GEO_STORAGE=mysql 时需要）=====
 DB_HOST=127.0.0.1
 DB_PORT=3306

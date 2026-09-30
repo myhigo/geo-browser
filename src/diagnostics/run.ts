@@ -119,7 +119,9 @@ async function runDiagnosticInner(
     args: ['--disable-blink-features=AutomationControlled'],
     // 去掉 Playwright 默认注入的 --enable-automation（会留下 cdc_ 钩子与 webdriver 标记）
     ignoreDefaultArgs: ['--enable-automation'],
-    ...(proxy ? { proxy } : {}),
+    ...(proxy
+      ? { proxy: config.proxyBypass ? { ...proxy, bypass: `${config.proxyBypass}, <-loopback>` } : proxy }
+      : {}),
   };
   if (opts.executablePath) {
     launchOpts.executablePath = opts.executablePath;

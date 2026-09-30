@@ -16,7 +16,7 @@ import { proxyRepo, isDirectIp } from '../storage/proxyRepo.js';
 import { paths, config } from '../config/index.js';
 
 /** 传给 Playwright 的代理选项（直连/不存在/未启用 → undefined 表示不注入） */
-export type ProxyOpts = { server: string; username?: string; password?: string };
+export type ProxyOpts = { server: string; username?: string; password?: string; bypass?: string };
 
 /** 按账号对象解析代理：直连 / 不存在 / 未启用 → undefined（不注入） */
 export async function proxyOfAccount(acc: Account): Promise<ProxyOpts | undefined> {
@@ -337,7 +337,11 @@ function launchOpts(proxy?: ProxyOpts): Parameters<typeof chromium.launchPersist
     userAgent:
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
   };
-  if (proxy) o.proxy = proxy;
+  if (proxy) {
+    o.proxy = config.proxyBypass
+      ? { ...proxy, bypass: `${config.proxyBypass}, <-loopback>` }
+      : proxy;
+  }
   return o;
 }
 

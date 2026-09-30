@@ -105,21 +105,64 @@ export class DoubaoAdapter implements PlatformAdapter {
       console.warn('⚠️ 输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
     }
 
-    // 是否真的发出去：输入框是否已被清空（不再含原问题）
-    const isSent = async (): Promise<boolean> => !(await enteredText()).includes(probe);
+    // 回答已开始信号：流式胶囊可见，或回答容器已有文本。优于"输入框清空"判定。
+    const answerStarted = (): Promise<boolean> =>
+      this.page
+        .evaluate(() => {
+          const cap = document.querySelector('[class*="capsule-loading"]');
+          if (cap && (cap as HTMLElement).getBoundingClientRect().width > 0) return true;
+          const ans = document.querySelector(
+            '.answer-content, .message-content, [class*="answer"], [class*="response"]'
+          );
+          return !!ans && (ans.textContent || '').trim().length > 0;
+        })
+        .catch(() => false);
 
-    // 1) 优先 Enter（贴合用户习惯）。发送前随机停顿 500–1000ms（模拟真人检查后发送）
-    await this.page.waitForTimeout(randWaitMs(DOUBAO_INPUT_PRE_ENTER));
-    await this.page.keyboard.press('Enter');
-    if (await isSent()) return;
+    // 输入框是否仍含原问题
+    const stillHasInput = (): Promise<boolean> => enteredText().then((t) => t.includes(probe));
 
-    // 2) 兜底：点输入区内圆钮
-    await input.locator.click().catch(() => {});
-    const send = await firstFound(this.page, this.selectors.sendButton);
-    if (send) await send.locator.click().catch(() => {});
-    if (await isSent()) return;
+    // 轮询等待回答开始，最迟 waitMs
+    const waitAnswerStart = async (waitMs: number): Promise<boolean> => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < waitMs) {
+        if (await answerStarted()) return true;
+        await this.page.waitForTimeout(1000);
+      }
+      return false;
+    };
 
-    console.warn('⚠️ 发送未能确认（输入框仍含原问题），请人工检查发送交互');
+    let sentConfirmed = false;
+    for (let attempt = 0; attempt <= 2 && !sentConfirmed; attempt++) {
+      // 回答已开始 或 输入框已清空 → 均视为已提交
+      if ((await answerStarted()) || !(await stillHasInput())) {
+        sentConfirmed = true;
+        break;
+      }
+      if (attempt > 0) {
+        console.warn(`⚠️ 发送重试 #${attempt}：输入框仍含原问题且未见回答，再次发送`);
+      }
+      // 主发送：Enter（发送前随机停顿，模拟真人检查后发送）
+      await this.page.waitForTimeout(randWaitMs(DOUBAO_INPUT_PRE_ENTER));
+      await this.page.keyboard.press('Enter');
+      if (await waitAnswerStart(attempt === 0 ? 20000 : 8000)) {
+        sentConfirmed = true;
+        break;
+      }
+      // 主窗口未见回答：输入框仍含原问题 → 兜底点发送钮补发
+      if (await stillHasInput()) {
+        await input.locator.click().catch(() => {});
+        const send = await firstFound(this.page, this.selectors.sendButton);
+        if (send) await send.locator.click().catch(() => {});
+        if (await waitAnswerStart(attempt === 0 ? 6000 : 4000)) sentConfirmed = true;
+      } else {
+        // 输入框已清空：内容已提交，交后续等待
+        sentConfirmed = true;
+      }
+    }
+
+    if (!sentConfirmed) {
+      console.warn('⚠️ 发送未能确认（多次重试仍未见回答），请人工检查发送交互');
+    }
   }
 
   // 模拟真人逐字输入：单字录入，随机间隔 180–450ms（用户反馈更快速度仍"太快"）；
