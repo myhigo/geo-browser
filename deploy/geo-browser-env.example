@@ -29,6 +29,8 @@ GEO_DPS_SECRET_ID=
 GEO_DPS_SECRET_KEY=
 GEO_DPS_USERNAME=
 GEO_DPS_PASSWORD=
+# 复用阈值（秒）：动态代理 IP 剩余有效期低于此值不再复用，默认 60
+GEO_DPS_MIN_TTL_SEC=60
 
 # 用系统 Chrome（本地版开）；容器版关
 GEO_USE_SYSTEM_CHROME=1

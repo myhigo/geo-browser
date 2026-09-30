@@ -72,6 +72,8 @@ export interface DpsConfig {
   secretKey: string;
   username: string;
   password: string;
+  /** 复用阈值（秒）：IP 剩余有效期低于此值不再复用，默认 60 */
+  minTtlSec: number;
 }
 
 export interface AppConfig {
@@ -183,6 +185,7 @@ export const config: AppConfig = {
     secretKey: env('GEO_DPS_SECRET_KEY') ?? '',
     username: env('GEO_DPS_USERNAME') ?? '',
     password: env('GEO_DPS_PASSWORD') ?? '',
+    minTtlSec: num('GEO_DPS_MIN_TTL_SEC', 60),
   },
   artifactMode: env('GEO_ARTIFACT_MODE') === 'debug' ? 'debug' : 'none',
   headless: bool('GEO_HEADLESS', true),

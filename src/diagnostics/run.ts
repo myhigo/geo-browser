@@ -78,16 +78,26 @@ export async function runDiagnostic(
   question: string,
   opts: LaunchOpts = {}
 ): Promise<DiagnosticResult> {
+  return runDiagnosticInner(question, opts, false);
+}
+
+async function runDiagnosticInner(
+  question: string,
+  opts: LaunchOpts,
+  retried: boolean
+): Promise<DiagnosticResult> {
   const def: PlatformDef = resolvePlatform(opts.platform || 'doubao');
   const url = opts.url || def.defaultUrl;
 
   const headless = opts.headless ?? process.env.GEO_HEADLESS === '1';
-  // 动态代理：配了 GEO_DPS_SECRET_ID 时，每次开浏览器都取一个新 IP；取不到则回退到传入的代理/直连
+  // 动态代理：配了 GEO_DPS_SECRET_ID 时复用 IP 池里剩余 > 阈值的代理，都不够才取新 IP；取不到回退传入代理/直连
   let proxy = opts.proxy;
+  let usedDps = false;
   if (config.dps.secretId) {
-    const dps = await fetchDpsProxy();
+    const dps = await fetchDpsProxy(retried);
     if (dps) {
       proxy = dps;
+      usedDps = true;
       console.log(`🌐 [dps] 本次使用动态代理：${dps.server}`);
     } else {
       console.log(`⚠️ [dps] 取动态代理失败，回退到${opts.proxy ? '账号绑定代理' : '直连'}`);
@@ -531,6 +541,10 @@ export async function runDiagnostic(
 
   notes.forEach((n) => console.log(n));
   if (!result) {
+    if (usedDps && !retried) {
+      console.log('⚠️ [dps] 任务未完成，换新 IP 重试一次');
+      return runDiagnosticInner(question, opts, true);
+    }
     throw new Error(notes.filter((n) => n.includes('❌')).join('；') || '诊断未完成');
   }
   return result;
