@@ -36,6 +36,9 @@ export interface Account {
   proxyPort?: number;
   /** 绑定代理 IP 的 id（geo_ui_proxy_ip.id）；null/未填 = 不绑代理（走宿主机出口） */
   proxyId?: number;
+  /** 出口模式：local=本地IP直连；static=绑定静态代理(proxy_id)；dynamic=每次采集取快代理动态IP。
+   *  未填=沿用旧逻辑（proxy_id 有值则 static，否则 local），老数据零迁移 */
+  ipMode?: 'local' | 'static' | 'dynamic';
   /** 占用者（instanceId）；null/空 = 空闲。跨重启可据此回收脏占用 */
   leasedBy?: string | null;
 }
@@ -162,6 +165,7 @@ const FIELD_MAP: Record<string, string> = {
   proxyHost: 'proxy_host',
   proxyPort: 'proxy_port',
   proxyId: 'proxy_id',
+  ipMode: 'ip_mode',
   leasedBy: 'leased_by',
 };
 
@@ -177,7 +181,7 @@ const SELECT_COLS = `account_code AS id, remark, nickname, status, note,
   UNIX_TIMESTAMP(last_used_at) * 1000 AS lastUsedAt,
   today_queries AS todayQueries, query_date AS queryDate,
   consecutive_fails AS consecutiveFails,
-  proxy_host AS proxyHost, proxy_port AS proxyPort, proxy_id AS proxyId, leased_by AS leasedBy`;
+  proxy_host AS proxyHost, proxy_port AS proxyPort, proxy_id AS proxyId, ip_mode AS ipMode, leased_by AS leasedBy`;
 
 interface Row extends RowDataPacket {
   id: string;
@@ -194,6 +198,7 @@ interface Row extends RowDataPacket {
   proxyHost?: string | null;
   proxyPort?: number | null;
   proxyId?: number | null;
+  ipMode?: string | null;
   leasedBy?: string | null;
 }
 
@@ -213,6 +218,7 @@ const toAccount = (r: Row): Account => ({
   proxyHost: r.proxyHost ?? undefined,
   proxyPort: r.proxyPort ?? undefined,
   proxyId: r.proxyId == null ? undefined : Number(r.proxyId),
+  ipMode: (r.ipMode ?? undefined) as Account['ipMode'],
   leasedBy: r.leasedBy ?? null,
 });
 
@@ -271,8 +277,8 @@ export class MysqlAccountRepo implements AccountRepo {
     await dbPool().query(
       `INSERT INTO geo_ui_platform_account
          (node_id, platform_id, account_code, remark, nickname, status, note,
-          today_queries, query_date, consecutive_fails, last_used_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FROM_UNIXTIME(? / 1000), NOW())`,
+          today_queries, query_date, consecutive_fails, ip_mode, last_used_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FROM_UNIXTIME(? / 1000), NOW())`,
       [
         config.nodeId,
         platformId,
@@ -284,6 +290,7 @@ export class MysqlAccountRepo implements AccountRepo {
         account.todayQueries ?? 0,
         account.queryDate ?? null,
         account.consecutiveFails ?? 0,
+        account.ipMode ?? null,
         account.lastUsedAt ?? null,
       ]
     );

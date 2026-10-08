@@ -290,9 +290,10 @@ export async function releaseAccount(platformId: string, accountId: string, succ
   inFlight.delete(accountId);
   const acc = await accountRepo().get(platformId, accountId);
   if (!acc) return;
-  // 动态代理下每次都是新 IP，冷却键 (平台,账号绑定的proxyId) 恒为同一个，冷却意义失效 → 跳过
-  if (config.dps.secretId) {
-    console.log(`[dps] 动态代理模式，跳过 (${platformId},proxy#${acc.proxyId ?? '-'}) 冷却`);
+  // 动态出口账号每次都是新 IP，冷却键恒为同一键、冷却意义失效 → 跳过；
+  // 静态/本地账号按 (平台,IP) 冷却（调度 v2 防风控）。
+  if (acc.ipMode === 'dynamic') {
+    console.log(`[dps] 动态出口账号（${platformId}/${acc.id}），跳过冷却`);
   } else {
     markCooldown(platformId, acc.proxyId); // (平台,IP) 进入冷却（调度 v2 防风控）
   }
@@ -573,7 +574,8 @@ export async function startLogin(
   const task = (async () => {
     let context: BrowserContext;
     try {
-      context = await launchPersistentRetry(acc.dir, launchOpts(await proxyOfAccount(acc)));
+      // 登录窗口固定本地 IP（用户 2026-10-08 定：登录/测试窗口不代理，登录态不依赖出口 IP）
+      context = await launchPersistentRetry(acc.dir, launchOpts());
     } catch (e) {
       await accountRepo().patch(platformId, acc.id, { status: 'failed', note: `打开登录窗口失败：${(e as Error).message}` });
       return;
@@ -610,7 +612,7 @@ export async function startLogin(
       // active 以「磁盘登录态可还原」为准（verifySession = 无头重开同一目录验证登录墙/输入框）。
       // 不再抽昵称（2026-09-23 按用户要求简化）；文心等无登录墙平台的"磁盘未持久化"兜底
       // 由 confirmLogin 里的会话级 cookie 转持久（重种 365 天）承担。
-      const v = await verifySession(platformId, acc.dir, await proxyOfAccount(acc));
+      const v = await verifySession(platformId, acc.dir);
       if (v.ok) {
         await accountRepo().patch(platformId, acc.id, {
           status: 'active',
@@ -837,7 +839,8 @@ export async function testAccount(
   }
   let context: BrowserContext;
   try {
-    context = await launchPersistentRetry(acc.dir, launchOpts(await proxyOfAccount(acc)));
+    // 测试窗口固定本地 IP（用户 2026-10-08 定：登录/测试窗口不代理）
+    context = await launchPersistentRetry(acc.dir, launchOpts());
   } catch (e) {
     return { ok: false, msg: `打开测试窗口失败：${(e as Error).message}` };
   }

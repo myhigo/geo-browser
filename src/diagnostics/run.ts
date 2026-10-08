@@ -73,6 +73,8 @@ export interface LaunchOpts {
   headless?: boolean;
   /** 代理（真实走代理出口，防风控）：server 形如 http://host:port 或 socks5://host:port */
   proxy?: { server: string; username?: string; password?: string };
+  /** 出口模式=动态（按账号 ipMode 设置）：开浏览器前取快代理新 IP；失败回退到 proxy（静态/直连） */
+  dynamic?: boolean;
 }
 
 export async function runDiagnostic(
@@ -103,17 +105,18 @@ async function runDiagnosticScoped(
   const url = opts.url || def.defaultUrl;
 
   const headless = opts.headless ?? process.env.GEO_HEADLESS === '1';
-  // 动态代理：配了 GEO_DPS_SECRET_ID 时复用 IP 池里剩余 > 阈值的代理，都不够才取新 IP；取不到回退传入代理/直连
+  // 动态出口（按账号 ipMode=dynamic）：开浏览器前取快代理新 IP；取不到回退传入的静态代理/直连。
+  // 不再读全局 config.dps.secretId——是否走动态由账号 ipMode 决定，支持同机混搭。
   let proxy = opts.proxy;
   let usedDps = false;
-  if (config.dps.secretId) {
+  if (opts.dynamic) {
     const dps = await fetchDpsProxy(retried);
     if (dps) {
       proxy = dps;
       usedDps = true;
       log(`🌐 [dps] 本次使用动态代理：${dps.server}`);
     } else {
-      log(`⚠️ [dps] 取动态代理失败，回退到${opts.proxy ? '账号绑定代理' : '直连'}`);
+      log(`⚠️ [dps] 取动态代理失败，回退到${opts.proxy ? '账号静态代理' : '直连'}`);
     }
   }
   const launchOpts: {

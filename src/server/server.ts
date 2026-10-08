@@ -186,13 +186,23 @@ export async function execute(
   } else {
     waitLoginMs = headed ? 120_000 : 0; // 登录态平台：有头窗口内等人工登录
   }
+  // 采集出口：按账号 ipMode 决定。static→绑定静态代理；local→直连；dynamic→run.ts 取快代理新 IP。
+  // 登录/测试窗口固定本地 IP（见 loginRegistry），此处仅约束采集出口。
+  let collectProxy: Awaited<ReturnType<typeof proxyOf>> | undefined;
+  let useDynamic = false;
+  if (ledgerAccountId) {
+    const a = await accountRepo().get(platform, ledgerAccountId);
+    useDynamic = !!a && a.ipMode === 'dynamic';
+    collectProxy = useDynamic ? undefined : await proxyOf(platform, ledgerAccountId);
+  }
   let result = await runDiagnostic(keyword, {
     platform,
     useSystemChrome: true,
     userDataDir,
     headless: !headed,
     waitLoginMs,
-    proxy: ledgerAccountId ? await proxyOf(platform, ledgerAccountId) : undefined,
+    proxy: collectProxy,
+    dynamic: useDynamic,
   });
   if (rotation) await releaseIdentity(platform, result.loginRequired);
   if (ledgerAccountId) {
@@ -786,6 +796,30 @@ app.post('/api/accounts/:platform/:accountId/proxy', async (req, res) => {
     res.status(200).json({ ok: true, msg: `已绑定 ${ip.host}:${ip.port}，该账号需重新登录` });
   } catch (e) {
     res.status(500).json({ msg: `绑定失败：${(e as Error).message}` });
+  }
+});
+
+// 账号出口模式：local=本地IP直连；static=绑定静态代理；dynamic=每次采集取快代理动态IP。
+// 与代理绑定互不影响：static 用 proxyId；dynamic 忽略 proxyId 每次取新 IP；local 直连。
+app.post('/api/accounts/:platform/:accountId/ip-mode', async (req, res) => {
+  const platform = String(req.params.platform).toLowerCase();
+  const accountId = String(req.params.accountId);
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  const ipMode = b.ipMode;
+  if (ipMode !== 'local' && ipMode !== 'static' && ipMode !== 'dynamic') {
+    res.status(400).json({ msg: 'ipMode 无效（local/static/dynamic）' });
+    return;
+  }
+  const acc = await accountRepo().get(platform, accountId);
+  if (!acc) {
+    res.status(404).json({ msg: '账号不存在' });
+    return;
+  }
+  try {
+    await accountRepo().patch(platform, accountId, { ipMode: ipMode as 'local' | 'static' | 'dynamic' });
+    res.status(200).json({ ok: true, msg: `出口模式已设为 ${ipMode}（切换出口不影响已登录态，无需重新登录）` });
+  } catch (e) {
+    res.status(500).json({ msg: `设置失败：${(e as Error).message}` });
   }
 });
 

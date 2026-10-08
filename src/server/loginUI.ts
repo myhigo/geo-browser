@@ -139,7 +139,17 @@ function renderAccounts(){
           if(x.note) label += ' '+esc(x.note);
           return '<option value="'+x.id+'"'+(cur===x.id?' selected':'')+'>'+label+'</option>';
         }).join('');
-      return '<select class="proxy-sel" data-acc="'+esc(a.id)+'">'+opts+'</select>';
+      return '<select class="proxy-sel" data-acc="'+esc(a.id)+'"'+(a.ipMode==='dynamic'?' disabled':'')+'>'+opts+'</select>';
+    };
+    // 出口模式下拉：local=本地IP直连；static=绑定静态代理；dynamic=快代理动态IP（选 dynamic 时禁用上面的代理下拉）
+    var ipModeSelHtml = function(a){
+      var mode = a.ipMode || (a.proxyId ? 'static' : 'local');
+      var opts = [
+        { v:'local', t:'本地IP' },
+        { v:'static', t:'静态IP' },
+        { v:'dynamic', t:'动态IP' }
+      ].map(function(o){ return '<option value="'+o.v+'"'+(mode===o.v?' selected':'')+'>'+o.t+'</option>'; }).join('');
+      return '<select class="proxy-sel ipmode-sel" data-acc="'+esc(a.id)+'">'+opts+'</select>';
     };
     // 是否有账号在登录中（waiting）→ 3s 轮询刷新卡片状态
     var needLogin = p.accounts.some(function(a){ return a.status==='waiting'; });
@@ -165,6 +175,8 @@ function renderAccounts(){
         + '<span class="k">最近使用</span><b>'+(a.lastUsedAt?fmtTime(a.lastUsedAt):'-')+'</b></div>'
         // 第四行：代理
         + '<div class="acc-row"><span class="k">代理</span>'+proxySelHtml(a)+'</div>'
+        // 第五行：出口模式
+        + '<div class="acc-row"><span class="k">出口</span>'+ipModeSelHtml(a)+'</div>'
         // 第五行：连续失败（有才显示）
         + (a.consecutiveFails?'<div class="acc-fail"><span class="k">连续失败</span><b>'+a.consecutiveFails+'</b></div>':'');
       if(a.note) accHtml += '<div class="note">'+esc(a.note)+'</div>';
@@ -590,13 +602,24 @@ document.addEventListener('click', function(ev){
 });
 // 账号绑定代理下拉（change 事件；2026-09-24 与 geo-ui-browser 一致：POST /api/accounts/:platform/:accountId/proxy）
 document.addEventListener('change', function(ev){
-  var sel = ev.target && ev.target.closest ? ev.target.closest('select.proxy-sel') : null;
+  var sel = ev.target && ev.target.closest ? ev.target.closest('select.proxy-sel:not(.ipmode-sel)') : null;
   if(!sel) return;
   var acc = sel.getAttribute('data-acc');
   var plat = (CUR==='__accounts') ? ACC_PLATFORM : CUR;
   fetch('/api/accounts/'+plat+'/'+encodeURIComponent(acc)+'/proxy', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({proxyId: sel.value ? Number(sel.value) : null}) })
     .then(function(r){ return r.json().catch(function(){ return {msg:'响应解析失败'}; }); })
     .then(function(j){ toast((j&&j.msg)||'已更新代理'); render(); })
+    .catch(function(e){ toast('请求失败：'+e.message); });
+});
+// 账号出口模式下拉（change 事件；POST /api/accounts/:platform/:accountId/ip-mode）
+document.addEventListener('change', function(ev){
+  var sel = ev.target && ev.target.closest ? ev.target.closest('select.ipmode-sel') : null;
+  if(!sel) return;
+  var acc = sel.getAttribute('data-acc');
+  var plat = (CUR==='__accounts') ? ACC_PLATFORM : CUR;
+  fetch('/api/accounts/'+plat+'/'+encodeURIComponent(acc)+'/ip-mode', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ipMode: sel.value}) })
+    .then(function(r){ return r.json().catch(function(){ return {msg:'响应解析失败'}; }); })
+    .then(function(j){ toast((j&&j.msg)||'已更新出口模式'); render(); })
     .catch(function(e){ toast('请求失败：'+e.message); });
 });
 fetch('/api/login/platforms').then(function(r){ return r.json(); }).then(function(d){
