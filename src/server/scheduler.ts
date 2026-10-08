@@ -61,7 +61,7 @@ async function scanOnce(maxSlots: number): Promise<void> {
     task.state = 'running';
     task.accountId = acc.id;
     slotCount++;
-    const ipLabel = acc.ipMode === 'dynamic' ? '动态IP' : acc.proxyId ? `proxy#${acc.proxyId}` : '宿主机';
+    const ipLabel = acc.ipMode === 'dynamic' ? '动态IP' : acc.ipMode === 'static' ? (acc.proxyId ? `proxy#${acc.proxyId}` : '静态(未绑代理)') : '本地IP';
     logger(`[scheduler] 词${task.wordId}「${task.keyword}」×${task.platform} 开始（账号 ${acc.id}，${ipLabel}）`);
     const exec = executor;
     if (!exec) {

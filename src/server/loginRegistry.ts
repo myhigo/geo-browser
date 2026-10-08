@@ -18,8 +18,10 @@ import { paths, config } from '../config/index.js';
 /** 传给 Playwright 的代理选项（直连/不存在/未启用 → undefined 表示不注入） */
 export type ProxyOpts = { server: string; username?: string; password?: string; bypass?: string };
 
-/** 按账号对象解析代理：直连 / 不存在 / 未启用 → undefined（不注入） */
+/** 按账号对象解析采集代理：仅 static 走绑定静态代理；local 直连；dynamic 由采集层（server.ts）截留走快代理。
+ *  以 ipMode 为准，不再按 proxyId 隐式判定——未配置视为 local（直连） */
 export async function proxyOfAccount(acc: Account): Promise<ProxyOpts | undefined> {
+  if (acc.ipMode !== 'static') return undefined; // local/dynamic 不在此解析
   if (acc.proxyId == null) return undefined;
   return proxyOfId(acc.proxyId);
 }

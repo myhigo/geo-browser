@@ -143,7 +143,7 @@ function renderAccounts(){
     };
     // 出口模式下拉：local=本地IP直连；static=绑定静态代理；dynamic=快代理动态IP（选 dynamic 时禁用上面的代理下拉）
     var ipModeSelHtml = function(a){
-      var mode = a.ipMode || (a.proxyId ? 'static' : 'local');
+      var mode = a.ipMode || 'local';
       var opts = [
         { v:'local', t:'本地IP' },
         { v:'static', t:'静态IP' },

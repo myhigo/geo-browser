@@ -37,7 +37,7 @@ export interface Account {
   /** 绑定代理 IP 的 id（geo_ui_proxy_ip.id）；null/未填 = 不绑代理（走宿主机出口） */
   proxyId?: number;
   /** 出口模式：local=本地IP直连；static=绑定静态代理(proxy_id)；dynamic=每次采集取快代理动态IP。
-   *  未填=沿用旧逻辑（proxy_id 有值则 static，否则 local），老数据零迁移 */
+   *  必填，默认 local（直连）；不允许 null，需显式选择 static/dynamic */
   ipMode?: 'local' | 'static' | 'dynamic';
   /** 占用者（instanceId）；null/空 = 空闲。跨重启可据此回收脏占用 */
   leasedBy?: string | null;
@@ -69,7 +69,7 @@ export class FileAccountRepo implements AccountRepo {
   async list(platformId: string): Promise<Account[]> {
     try {
       return (JSON.parse(fs.readFileSync(ledgerFileOf(platformId), 'utf-8')) as Account[]).reverse()
-        .map((a) => ({ ...a, dir: accountDirOf(a.id) }));
+        .map((a) => ({ ...a, dir: accountDirOf(a.id), ipMode: (a.ipMode ?? 'local') as 'local' | 'static' | 'dynamic' }));
     } catch {
       return this.migrateLegacy(platformId);
     }
@@ -100,6 +100,7 @@ export class FileAccountRepo implements AccountRepo {
           lastUsedAt: old.lastUsedAt,
           todayQueries: old.todayQueries ?? 0,
           consecutiveFails: old.consecutiveFails ?? 0,
+          ipMode: 'local',
         },
       ];
       fs.rmSync(legacyStateFileOf(platformId), { force: true });
@@ -198,7 +199,7 @@ interface Row extends RowDataPacket {
   proxyHost?: string | null;
   proxyPort?: number | null;
   proxyId?: number | null;
-  ipMode?: string | null;
+  ipMode?: string;
   leasedBy?: string | null;
 }
 
@@ -218,7 +219,7 @@ const toAccount = (r: Row): Account => ({
   proxyHost: r.proxyHost ?? undefined,
   proxyPort: r.proxyPort ?? undefined,
   proxyId: r.proxyId == null ? undefined : Number(r.proxyId),
-  ipMode: (r.ipMode ?? undefined) as Account['ipMode'],
+  ipMode: (r.ipMode as 'local' | 'static' | 'dynamic') ?? 'local',
   leasedBy: r.leasedBy ?? null,
 });
 
@@ -290,7 +291,7 @@ export class MysqlAccountRepo implements AccountRepo {
         account.todayQueries ?? 0,
         account.queryDate ?? null,
         account.consecutiveFails ?? 0,
-        account.ipMode ?? null,
+        account.ipMode ?? 'local',
         account.lastUsedAt ?? null,
       ]
     );
