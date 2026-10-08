@@ -3,6 +3,7 @@
 // ⚠️ 选择器为候选起点：首轮运行的 finished.html / answering.html 是定标依据，
 //    尤其「生成中→已结束」的明确标志（待从生成态样本中找，如输入区 send↔stop 切换）。
 import { Page, BrowserContext } from 'playwright';
+import { log } from '../../log.js';
 import fs from 'fs';
 import sharp from 'sharp';
 import { DEEPSEEK_CANDIDATE_SELECTORS } from './selectors.js';
@@ -196,21 +197,21 @@ export class DeepseekAdapter implements PlatformAdapter {
       //    多轮旧回答也有动作行 → 基线计数；文本稳定条件防止动作行在流式中途挂载导致截断。
       const actBars = await this.countActionRow();
       if (actBars > this.actionRowBaseline && noGrowthStreak >= 3) {
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 检测到回答动作行（复制/点赞/点踩…）且文本稳定，回答已完成（当前 ${lastLen ?? 0} 字）`
         );
         break;
       }
       // ① 主判定：答案流式输出过（相对基线明显增长）+ 连续 10s 无新增 → 完成
       if (everGrew && noGrowthStreak >= 10) {
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 回答已流式输出并稳定 10s（峰值 ${lastLen ?? 0} 字）→ 完成`
         );
         break;
       }
       // ② 安全网：始终未明显增长（搜索/思考阶段无渲染、缓存式瞬时答案或卡死）→ 45s 无变化继续
       if (!everGrew && noGrowthStreak >= 45) {
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 45s 未见文本明显增长（可能仍在思考/被风控），按超时继续`
         );
         break;
@@ -218,7 +219,7 @@ export class DeepseekAdapter implements PlatformAdapter {
 
       if (Date.now() - lastProgressLog > 10000) {
         const grew = baselineLen !== null && len !== null ? Math.max(0, len - baselineLen) : 0;
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 检索/思考中…（容器 ${len === null ? '未出现' : len + ' 字'}，较基线 +${grew} 字）`
         );
         lastProgressLog = Date.now();
@@ -231,13 +232,13 @@ export class DeepseekAdapter implements PlatformAdapter {
         midDumped = true;
         try {
           fs.writeFileSync(midDumpPath, await this.page.content());
-          console.log(`生成态 DOM 已落盘：${midDumpPath}`);
+          log(`生成态 DOM 已落盘：${midDumpPath}`);
         } catch {
           /* ignore */
         }
       }
     }
-    console.log(`[${((Date.now() - start) / 1000).toFixed(1)}s] 回答输出完成，开始抽取`);
+    log(`[${((Date.now() - start) / 1000).toFixed(1)}s] 回答输出完成，开始抽取`);
     await this.page.waitForTimeout(500);
   }
 
@@ -271,7 +272,7 @@ export class DeepseekAdapter implements PlatformAdapter {
   async expandSources(): Promise<void> {
     const target = await this.findSourceHeader();
     if (!target) {
-      console.log('DeepSeek 未找到「已阅读 N 个网页」信源入口，跳过展开');
+      log('未找到「已阅读 N 个网页」信源入口，跳过展开');
       return;
     }
     const before = await this.countExternalAnchors();
@@ -302,7 +303,7 @@ export class DeepseekAdapter implements PlatformAdapter {
       await this.page.waitForTimeout(1500);
       after = await this.countExternalAnchors();
     }
-    console.log(
+    log(
       `点击信源入口「${target.text}」：外链 ${before} → ${after}` +
         (after > before ? '（抽屉已展开，含标题）' : '（未检测到新增外链，可能本回答无独立信源抽屉）')
     );
@@ -359,7 +360,7 @@ export class DeepseekAdapter implements PlatformAdapter {
       .catch(() => null)) as { title?: string; url: string }[] | null;
     if (!raw || !raw.length) return null;
     const titled = raw.filter((s) => s.title).length;
-    console.log(`DeepSeek 信源抽取：${raw.length} 条（含标题 ${titled} 条）`);
+    log(`信源抽取：${raw.length} 条（含标题 ${titled} 条）`);
     return raw.slice(0, 30).map((s) => ({
       title: s.title,
       url: s.url,
@@ -454,18 +455,18 @@ export class DeepseekAdapter implements PlatformAdapter {
         evalError?: string;
       };
       if (!pickInfo.ok) {
-        console.log(
-          `DeepSeek 截图跳过：未定位滚动容器（msgTotal=${pickInfo.msgTotal ?? '?'}）。` +
+        log(
+          `截图跳过：未定位滚动容器（msgTotal=${pickInfo.msgTotal ?? '?'}）。` +
             (pickInfo.chain?.join(' | ') || pickInfo.evalError || '')
         );
         return;
       }
-      console.log(
-        `DeepSeek 问答滚动容器（${pickInfo.pickBy}）：[${pickInfo.cls}] x=${pickInfo.x} y=${pickInfo.y} w=${pickInfo.w} h=${pickInfo.h} sh=${pickInfo.sh} ch=${pickInfo.ch}`
+      log(
+        `问答滚动容器（${pickInfo.pickBy}）：[${pickInfo.cls}] x=${pickInfo.x} y=${pickInfo.y} w=${pickInfo.w} h=${pickInfo.h} sh=${pickInfo.sh} ch=${pickInfo.ch}`
       );
       const scroller = page.locator('[data-ds-scroller]').first();
       if (!(await scroller.count().catch(() => 0))) {
-        console.log('DeepSeek 截图跳过：未定位到滚动容器（本轮无 Q&A 截图）');
+        log('截图跳过：未定位到滚动容器（本轮无 Q&A 截图）');
         return;
       }
       const info = (await scroller.evaluate((el) => ({
@@ -475,7 +476,7 @@ export class DeepseekAdapter implements PlatformAdapter {
       }))) as { sh: number; ch: number; vh: number };
       const box = await scroller.boundingBox().catch(() => null);
       if (!box || info.sh <= 0 || info.ch <= 10) {
-        console.log(`DeepSeek 截图跳过：滚动区异常（sh=${info.sh} ch=${info.ch}）`);
+        log(`截图跳过：滚动区异常（sh=${info.sh} ch=${info.ch}）`);
         return;
       }
       const sliceH = Math.max(60, Math.min(info.ch, info.vh - Math.max(0, Math.round(box.y)) - 12));
@@ -558,7 +559,7 @@ export class DeepseekAdapter implements PlatformAdapter {
         )
         .catch(() => {});
       if (!tiles.length) {
-        console.log('DeepSeek 截图跳过：未拍到任何分片（本轮无 Q&A 截图）');
+        log('截图跳过：未拍到任何分片（本轮无 Q&A 截图）');
         return;
       }
       const metas = await Promise.all(tiles.map((t) => sharp(t).metadata()));
@@ -575,9 +576,9 @@ export class DeepseekAdapter implements PlatformAdapter {
         .composite(parts)
         .png()
         .toFile(outPath);
-      console.log(`DeepSeek Q&A 长屏截图完成（滚动拼接：${tiles.length} 片 → ${acc}px）`);
+      log(`Q&A 长屏截图完成（滚动拼接：${tiles.length} 片 → ${acc}px）`);
     } catch (e) {
-      console.log(`DeepSeek 截图失败（按要求不整页兜底）：${(e as Error).message}`);
+      log(`截图失败（按要求不整页兜底）：${(e as Error).message}`);
     }
   }
 

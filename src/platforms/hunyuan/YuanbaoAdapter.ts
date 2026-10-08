@@ -1,4 +1,5 @@
 import { Page, BrowserContext } from 'playwright';
+import { log, warn } from '../../log.js';
 import { TextDecoder } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -219,7 +220,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
         })
         .catch(() => false);
     if (!(await focusedEditable())) {
-      console.warn('⚠️ 元宝编辑器未获焦点，尝试 textarea 兜底聚焦');
+      warn('⚠️ 编辑器未获焦点，尝试 textarea 兜底聚焦');
       const ta = this.page.locator('textarea').first();
       await ta.click().catch(() => {});
       await ta.focus().catch(() => {});
@@ -241,7 +242,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
         .catch(() => '');
     const probe = question.slice(0, Math.max(1, Math.floor(question.length / 2)));
     if (!(await enteredText()).includes(probe)) {
-      console.warn('⚠️ 元宝输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
+      warn('⚠️ 输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
     }
 
     // ① 只点一次发送钮（稳定选择器：#yuanbao-send-btn / a[aria-label="发送"]）
@@ -253,7 +254,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
     await this.page.keyboard.press('Enter').catch(() => {});
     if (await this.waitAnswerStarted(6000)) return;
 
-    console.warn('⚠️ 元宝发送未能确认（未见助手回答气泡），请人工检查发送交互');
+    warn('⚠️ 发送未能确认（未见助手回答气泡），请人工检查发送交互');
   }
 
   // 发送确认：等待助手气泡（.agent-chat__bubble--ai）出现即视为发送成功。
@@ -334,13 +335,13 @@ export class YuanbaoAdapter implements PlatformAdapter {
         }
 
         if (everGrew && noGrowth >= 8) {
-          console.log(
+          log(
             `[${(Date.now() - start) / 1000}s] 🏁 元宝回答文本连续 8s 无增长（兜底），当前 ${lastLen ?? 0} 字`
           );
           return 'text-stable';
         }
         if (noGrowth >= 40) {
-          console.log(
+          log(
             `[${(Date.now() - start) / 1000}s] 🏁 元宝文本连续 40s 无增长（可能缓存/瞬时答案），当前 ${lastLen ?? 0} 字`
           );
           return 'text-stable-cache';
@@ -348,7 +349,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
 
         if (Date.now() - lastProgressLog > 10000) {
           const phase = everGrew ? '📝 回答流式输出中…' : '⏳ 检索/思考中…';
-          console.log(
+          log(
             `[${(Date.now() - start) / 1000}s] ${phase}（容器 ${len === null ? '未出现' : len + ' 字'}）`
           );
           lastProgressLog = Date.now();
@@ -360,7 +361,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
 
     // 任意一个先到即完成
     const winner = await Promise.race([actionBarDone, textStableDone]);
-    console.log(
+    log(
       `[${(Date.now() - start) / 1000}s] ✅ 元宝回答输出完成（信号: ${winner}），开始抽取`
     );
     await this.page.waitForTimeout(500);
@@ -402,7 +403,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
   async expandSources(): Promise<void> {
     const page = this.page;
     if (this.chatRefs.length || this.detailRefs.length) {
-      console.log(
+      log(
         `⏭️ [元宝] 信源已由 API 拦截拿到（chat=${this.chatRefs.length}/detail=${this.detailRefs.length}），跳过 DOM 展开点击（避免误开外链新标签）`
       );
       return;
@@ -549,7 +550,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
           }
         }, this.selectors.sourceArea.join(', '))
         .catch((e) => {
-          if (attempt === 0) console.log(`[元宝信源诊断] evaluate 异常：${(e as Error).message}`);
+          if (attempt === 0) log(`[信源诊断] evaluate 异常：${(e as Error).message}`);
           return null;
         });
       if (last && last.found && last.items.length > 0) break;
@@ -557,7 +558,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
     }
     const attemptErr =
       (last && (last.diag as Record<string, unknown>)?.error) || (last ? null : 'evaluate_rejected_all_attempts');
-    console.log(`[元宝信源诊断] ${JSON.stringify(last?.diag ?? { none: true })}，抽到 ${last?.items.length ?? 0} 条`);
+    log(`[信源诊断] ${JSON.stringify(last?.diag ?? { none: true })}，抽到 ${last?.items.length ?? 0} 条`);
 
     // 全量扫描落盘：无论是否定位到/是否抛错都落盘（之前静默失败无落盘，导致排查无据），便于校准与定位根因
     if (captureDir) {
@@ -604,12 +605,12 @@ export class YuanbaoAdapter implements PlatformAdapter {
       const scanOut = { ts: Date.now(), attemptError: attemptErr, scan };
       const p = path.join(captureDir, 'sources-scan.json');
       fs.writeFileSync(p, JSON.stringify(scanOut, null, 2));
-      console.log(`[元宝信源诊断] 全量扫描已落盘：${path.relative(process.cwd(), p)}`);
+      log(`[信源诊断] 全量扫描已落盘：${path.relative(process.cwd(), p)}`);
     }
     // 优先用 API 拦截拿到的真实引用：元宝信源不在可见 DOM 文本里，全靠 chat/detail 响应的 docs 数组。
     const apiRefs = this.chatRefs.length ? this.chatRefs : this.detailRefs;
     if (apiRefs.length) {
-      console.log(
+      log(
         `[元宝信源] 经 API 拦截拿到 ${apiRefs.length} 条真实信源（chat=${this.chatRefs.length}/detail=${this.detailRefs.length}）`
       );
       const seen = new Set<string>();
@@ -651,7 +652,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
       if (dump) {
         const p = path.join(captureDir, 'sources-debug.json');
         fs.writeFileSync(p, JSON.stringify(dump, null, 2));
-        console.log(`[元宝信源诊断] 0 条现场已落盘：${path.relative(process.cwd(), p)}`);
+        log(`[信源诊断] 0 条现场已落盘：${path.relative(process.cwd(), p)}`);
       }
     }
     if (!last.found) return null;
@@ -693,7 +694,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
   //   ⚠️ evaluate 内一律内联，禁止具名/变量赋值函数（esbuild keepNames 注入 __name → 页面报错）。
   async captureQaScreenshot(outPath: string, mode: ScreenshotMode = 'expand'): Promise<void> {
     if (mode === 'stitch') {
-      console.log('⚠️ 元宝策略 B（滚动分段拼接）尚未实现，本次回退到策略 A（clip 裁剪）');
+      log('⚠️ 策略 B（滚动分段拼接）尚未实现，本次回退到策略 A（clip 裁剪）');
     }
     const page = this.page;
     const aiCands = [
@@ -946,7 +947,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
     } catch {
       /* 诊断落盘失败不影响截图 */
     }
-    console.log('📐 元宝截图主策略诊断:', JSON.stringify(main));
+    log('📐 截图主策略诊断:', JSON.stringify(main));
 
     let clip: { x: number; y: number; width: number; height: number } | null =
       (main as any).ok && (main as any).clip ? (main as any).clip : null;
@@ -968,7 +969,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
         })
         .catch(() => null);
       if (region) {
-        console.log('📐 元宝截图兜底区域（问题→列表底部）:', JSON.stringify(region));
+        log('📐 截图兜底区域（问题→列表底部）:', JSON.stringify(region));
         clip = region;
       }
     }
@@ -983,6 +984,6 @@ export class YuanbaoAdapter implements PlatformAdapter {
     //   故长屏截图必须 fullPage:true + clip（仍按坐标裁剪，非整页兜底）。
     await page.screenshot({ path: outPath, clip, fullPage: true, animations: 'disabled', timeout: 60000 });
     const sz = fs.statSync(outPath).size;
-    console.log(`✂️ Q&A 长屏截图完成（元宝·clip 裁剪 + fullPage，${clip.width}x${clip.height}，${sz} bytes）`);
+    log(`✂️ Q&A 长屏截图完成（策略A clip 裁剪 + fullPage，${clip.width}x${clip.height}，${sz} bytes）`);
   }
 }

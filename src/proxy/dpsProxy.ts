@@ -3,6 +3,7 @@
 // getdpsvalidtime 响应：{ code, data: { "ip:port": 剩余秒 } }。账密走配置，不在响应里。
 
 import { config } from '../config/index.js';
+import { log } from '../log.js';
 
 export interface ProxyOpts {
   server: string;
@@ -45,13 +46,13 @@ async function requestOnce(): Promise<ProxyOpts | null> {
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     if (!res.ok) {
-      console.log(`[dps] HTTP ${res.status}`);
+      log(`[dps] HTTP ${res.status}`);
       return null;
     }
     const j = (await res.json()) as { code?: number; msg?: string; data?: { proxy_list?: string[] } };
-    console.log(`[dps] getdps 响应：${JSON.stringify(j)}`);
+    log(`[dps] getdps 响应：${JSON.stringify(j)}`);
     if (j.code !== 0 || !j.data?.proxy_list?.length) {
-      console.log(`[dps] code=${j.code} msg=${j.msg ?? ''}`);
+      log(`[dps] code=${j.code} msg=${j.msg ?? ''}`);
       return null;
     }
     const [host, port] = j.data.proxy_list[0].split(':');
@@ -62,7 +63,7 @@ async function requestOnce(): Promise<ProxyOpts | null> {
       ...(password ? { password } : {}),
     };
   } catch (e) {
-    console.log(`[dps] 请求异常：${(e as Error).message}`);
+    log(`[dps] 请求异常：${(e as Error).message}`);
     return null;
   }
 }
@@ -75,7 +76,7 @@ async function getDpsValidTime(proxies: string[]): Promise<Record<string, number
     const res = await fetch(`${VALIDTIME_API}?${q}`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
     if (!res.ok) return {};
     const j = (await res.json()) as { code?: number; data?: Record<string, number> };
-    console.log(`[dps] getdpsvalidtime 响应：${JSON.stringify(j)}`);
+    log(`[dps] getdpsvalidtime 响应：${JSON.stringify(j)}`);
     if (j.code !== 0 || !j.data) return {};
     return j.data;
   } catch {
@@ -138,7 +139,7 @@ export async function fetchDpsProxy(forceFresh = false): Promise<ProxyOpts | nul
       .filter((p) => liveRemaining(p) > minTtl)
       .sort((a, b) => liveRemaining(b) - liveRemaining(a));
     if (usable.length) {
-      console.log(`🌐 [dps] 复用缓存代理：${usable[0].server}（剩余约 ${Math.round(liveRemaining(usable[0]))}s）`);
+      log(`🌐 [dps] 复用缓存代理：${usable[0].server}（剩余约 ${Math.round(liveRemaining(usable[0]))}s）`);
       return usable[0];
     }
   }
@@ -147,6 +148,6 @@ export async function fetchDpsProxy(forceFresh = false): Promise<ProxyOpts | nul
   const fresh = await ensureFresh();
   if (!fresh.length) return null;
   const pick = fresh.sort((a, b) => liveRemaining(b) - liveRemaining(a))[0];
-  console.log(`🌐 [dps] 新取代理：${pick.server}（剩余约 ${Math.round(liveRemaining(pick))}s）`);
+  log(`🌐 [dps] 新取代理：${pick.server}（剩余约 ${Math.round(liveRemaining(pick))}s）`);
   return pick;
 }

@@ -1,4 +1,5 @@
 import { Page, BrowserContext } from 'playwright';
+import { log, warn } from '../../log.js';
 import fs from 'fs';
 import sharp from 'sharp';
 import { DOUBAO_CANDIDATE_SELECTORS } from './selectors.js';
@@ -75,7 +76,7 @@ export class DoubaoAdapter implements PlatformAdapter {
         })
         .catch(() => false);
     if (!(await focusedEditable())) {
-      console.warn('⚠️ 编辑器未获焦点，尝试 textarea 兜底聚焦');
+      warn('⚠️ 编辑器未获焦点，尝试 textarea 兜底聚焦');
       const ta = this.page.locator('textarea').first();
       await ta.click().catch(() => {});
       await ta.focus().catch(() => {});
@@ -102,7 +103,7 @@ export class DoubaoAdapter implements PlatformAdapter {
         .catch(() => '');
     const probe = question.slice(0, Math.max(1, Math.floor(question.length / 2)));
     if (!(await enteredText()).includes(probe)) {
-      console.warn('⚠️ 输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
+      warn('⚠️ 输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
     }
 
     // 回答已开始信号：发送控件进入生成态（aria-busy=true，发送钮变方块停止图标）、
@@ -142,7 +143,7 @@ export class DoubaoAdapter implements PlatformAdapter {
         break;
       }
       if (attempt > 0) {
-        console.warn(`⚠️ 发送重试 #${attempt}：输入框仍含原问题且未见回答，再次发送`);
+        warn(`⚠️ 发送重试 #${attempt}：输入框仍含原问题且未见回答，再次发送`);
       }
       // 主发送：Enter（发送前随机停顿，模拟真人检查后发送）
       await this.page.waitForTimeout(randWaitMs(DOUBAO_INPUT_PRE_ENTER));
@@ -164,7 +165,7 @@ export class DoubaoAdapter implements PlatformAdapter {
     }
 
     if (!sentConfirmed) {
-      console.warn('⚠️ 发送未能确认（多次重试仍未见回答），请人工检查发送交互');
+      warn('⚠️ 发送未能确认（多次重试仍未见回答），请人工检查发送交互');
     }
   }
 
@@ -318,13 +319,13 @@ export class DoubaoAdapter implements PlatformAdapter {
           captchaWaitMs += 1000;
           deadline += 1000; // 人工处理时间不挤占回答预算
           if (Date.now() - lastCaptchaLog > 10000) {
-            console.log(
+            log(
               `[${((Date.now() - start) / 1000).toFixed(1)}s] 🔒 检测到验证码，暂停超时倒计时等待处理（已等 ${Math.round(captchaWaitMs / 1000)}s）…`
             );
             lastCaptchaLog = Date.now();
           }
           if (captchaWaitMs >= 180000) {
-            console.log(
+            log(
               `[${((Date.now() - start) / 1000).toFixed(1)}s] ⚠️ 验证码等待超过 3 分钟，按本轮失败继续（现场已保留）`
             );
             break;
@@ -337,7 +338,7 @@ export class DoubaoAdapter implements PlatformAdapter {
       // —— 结束判定 ⓪ 动作栏出现 = 明确完成（优先级最高，元素驱动；用户 2026-09-04 提议）——
       const bars = await countActionBar();
       if (bars > actionBaseline) {
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 检测到回答动作栏（复制/朗读/…/更多），回答已完成（当前 ${lastLen ?? 0} 字）`
         );
         break;
@@ -346,7 +347,7 @@ export class DoubaoAdapter implements PlatformAdapter {
       // —— 结束判定 ——
       // ① 见过流式输出 → 胶囊消失 + 连续 5 次无增长 = 完成
       if (streamingSeen >= 1 && !streaming && noGrowthStreak >= 5) {
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 流式胶囊消失且文本稳定，当前 ${lastLen ?? 0} 字`
         );
         break;
@@ -354,7 +355,7 @@ export class DoubaoAdapter implements PlatformAdapter {
       // ② 该平台无胶囊（从未见过流式信号）→ 连续 30 次无增长兜底
       if (streamingSeen === 0 && noGrowthStreak >= 30) {
         const barsNow = await countActionBar();
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 无流式信号，文本连续 30s 无增长（兜底），当前 ${lastLen ?? 0} 字（动作栏 ${barsNow}/基线 ${actionBaseline}）`
         );
         break;
@@ -367,7 +368,7 @@ export class DoubaoAdapter implements PlatformAdapter {
           : streamingSeen >= 1
             ? '⏳ 收尾中…'
             : '⏳ 检索/思考中…';
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] ${phase}（容器 ${len === null ? '未出现' : len + ' 字'}）`
         );
         lastProgressLog = Date.now();
@@ -381,16 +382,16 @@ export class DoubaoAdapter implements PlatformAdapter {
         midDumped = true;
         try {
           fs.writeFileSync(midDumpPath, await this.page.content());
-          console.log(`💾 生成态 DOM 已落盘：${midDumpPath}（用于定标回答结束标志）`);
+          log(`💾 生成态 DOM 已落盘：${midDumpPath}（用于定标回答结束标志）`);
         } catch {
           /* ignore */
         }
       }
     }
     if (captchaSeen) {
-      console.log(`[${((Date.now() - start) / 1000).toFixed(1)}s] ℹ️ 本轮出现过验证码（累计等待 ${Math.round(captchaWaitMs / 1000)}s）`);
+      log(`[${((Date.now() - start) / 1000).toFixed(1)}s] ℹ️ 本轮出现过验证码（累计等待 ${Math.round(captchaWaitMs / 1000)}s）`);
     }
-    console.log(`[${((Date.now() - start) / 1000).toFixed(1)}s] ✅ 回答输出完成，开始抽取`);
+    log(`[${((Date.now() - start) / 1000).toFixed(1)}s] ✅ 回答输出完成，开始抽取`);
     await this.page.waitForTimeout(500); // 收尾缓冲
   }
 
@@ -443,7 +444,7 @@ export class DoubaoAdapter implements PlatformAdapter {
       .evaluate(() => document.querySelectorAll('a[data-thinking-box-tool-call="true"]').length > 0)
       .catch(() => false);
     if (alreadyExpanded) {
-      console.log('📂 豆包资料抽屉已展开，跳过');
+      log('📂 资料抽屉已展开，跳过');
       return;
     }
 
@@ -469,7 +470,7 @@ export class DoubaoAdapter implements PlatformAdapter {
     if (chipEl) {
       try {
         await chipEl.click({ timeout: 5000 });
-        console.log('📂 已点击豆包「参考 N 篇资料」chip');
+        log('📂 已点击「参考 N 篇资料」chip');
       } catch {
         // 兜底：按 boundingBox 中心点做真实鼠标点击
         const box = await chipEl.boundingBox().catch(() => null);
@@ -486,7 +487,7 @@ export class DoubaoAdapter implements PlatformAdapter {
         .evaluate(() => document.querySelectorAll('a[data-thinking-box-tool-call="true"]').length > 0)
         .catch(() => false);
       if (!hasCards) {
-        console.log('📂 抽屉未展开，再次点击 chip');
+        log('📂 抽屉未展开，再次点击 chip');
         await chipEl.click({ timeout: 3000 }).catch(() => {});
         await this.page.waitForTimeout(1200);
       }
@@ -588,7 +589,7 @@ export class DoubaoAdapter implements PlatformAdapter {
         .catch(() => {});
       const scroller = page.locator('[data-db-scroller]').first();
       if (!(await scroller.count().catch(() => 0))) {
-        console.log('豆包截图跳过：未定位到滚动容器（本轮无 Q&A 截图）');
+        log('截图跳过：未定位到滚动容器（本轮无 Q&A 截图）');
         return;
       }
       const info = (await scroller.evaluate((el) => ({
@@ -598,7 +599,7 @@ export class DoubaoAdapter implements PlatformAdapter {
       }))) as { sh: number; ch: number; vh: number };
       const box = await scroller.boundingBox().catch(() => null);
       if (!box || info.sh <= 0 || info.ch <= 10) {
-        console.log(`豆包截图跳过：滚动区异常（sh=${info.sh} ch=${info.ch}，本轮无 Q&A 截图）`);
+        log(`截图跳过：滚动区异常（sh=${info.sh} ch=${info.ch}，本轮无 Q&A 截图）`);
         return;
       }
       // 分片高度：不能超视口剩余（clip 出视口会报错），也不超过滚动区可视高
@@ -652,7 +653,7 @@ export class DoubaoAdapter implements PlatformAdapter {
         )
         .catch(() => {});
       if (!tiles.length) {
-        console.log('豆包截图跳过：未拍到任何分片（本轮无 Q&A 截图）');
+        log('截图跳过：未拍到任何分片（本轮无 Q&A 截图）');
         return;
       }
       // 纵向拼接：逐片量高 → 空白画布 composite 摆放（sharp 无图片 join，用 create+composite）
@@ -670,10 +671,10 @@ export class DoubaoAdapter implements PlatformAdapter {
         .composite(parts)
         .png()
         .toFile(outPath);
-      console.log(`✂️ 豆包 Q&A 长屏截图完成（策略B 滚动拼接：${tiles.length} 片 → ${acc}px）`);
+      log(`✂️ Q&A 长屏截图完成（策略B 滚动拼接：${tiles.length} 片 → ${acc}px）`);
     } catch (e) {
       // 2026-09-03 17:47 用户定：截图失败不整页/当前屏兜底，本轮无 Q&A 截图
-      console.log(`豆包截图失败（按要求不整页兜底，本轮无 Q&A 截图）：${(e as Error).message}`);
+      log(`截图失败（按要求不整页兜底，本轮无 Q&A 截图）：${(e as Error).message}`);
     }
   }
 

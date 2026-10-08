@@ -1,4 +1,5 @@
 import { Page, BrowserContext } from 'playwright';
+import { log, warn } from '../../log.js';
 import fs from 'fs';
 import { WENXIN_CANDIDATE_SELECTORS } from './selectors.js';
 import { firstFound } from '../../diagnostics/elementProbe.js';
@@ -71,7 +72,7 @@ export class WenxinAdapter implements PlatformAdapter {
     if ((await btn.count().catch(() => 0)) === 0) return false;
     if (!(await btn.isVisible().catch(() => false))) return false;
 
-    console.log(`🛡️ 检测到文心${label}，稍作停顿后仿人类点击关闭…`);
+    log(`🛡️ 检测到${label}，稍作停顿后仿人类点击关闭…`);
     await humanDelay(...WENXIN_AD_DETECT_PAUSE);
     const box = await btn.boundingBox().catch(() => null);
     if (box) {
@@ -94,7 +95,7 @@ export class WenxinAdapter implements PlatformAdapter {
       .then(() => true)
       .catch(() => false);
     if (gone) {
-      console.log(`✅ 文心${label}已关闭`);
+      log(`✅ ${label}已关闭`);
       return true;
     }
 
@@ -107,10 +108,10 @@ export class WenxinAdapter implements PlatformAdapter {
       .isVisible()
       .catch(() => false);
     if (!still) {
-      console.log(`✅ 文心${label}已关闭（Esc 兜底）`);
+      log(`✅ ${label}已关闭（Esc 兜底）`);
       return true;
     }
-    console.log(`⚠️ 文心${label}关闭钮已点，弹窗仍未消失（不影响后续，继续诊断）`);
+    log(`⚠️ ${label}关闭钮已点，弹窗仍未消失（不影响后续，继续诊断）`);
     return false;
   }
 
@@ -139,7 +140,7 @@ export class WenxinAdapter implements PlatformAdapter {
         })
         .catch(() => false);
     if (!(await focusedEditable())) {
-      console.warn('⚠️ 编辑器未获焦点，尝试 textarea 兜底聚焦');
+      warn('⚠️ 编辑器未获焦点，尝试 textarea 兜底聚焦');
       const ta = this.page.locator('textarea').first();
       await ta.click().catch(() => {});
       await ta.focus().catch(() => {});
@@ -151,9 +152,9 @@ export class WenxinAdapter implements PlatformAdapter {
     }
     // 打字前随机停顿 500–2000ms（模拟真人准备输入，避免一加载完就立刻打字）
     await this.page.waitForTimeout(randWaitMs(WENXIN_INPUT_PRE_TYPE));
-    console.log(`[${sec(Date.now())}] ⌨️ 开始逐字输入`);
+    log(`[${sec(Date.now())}] ⌨️ 开始逐字输入`);
     await this.humanType(question);
-    console.log(`[${sec(Date.now())}] ⌨️ 输入完成`);
+    log(`[${sec(Date.now())}] ⌨️ 输入完成`);
 
     // 校验问题文本是否真的进入输入框（contenteditable 或 textarea 任一含即可）。
     // ⚠️ 必须用单个 page.evaluate 一次读完，绝不能用 locator.innerText()/inputValue()：
@@ -168,7 +169,7 @@ export class WenxinAdapter implements PlatformAdapter {
         .catch(() => '');
     const probe = question.slice(0, Math.max(1, Math.floor(question.length / 2)));
     if (!(await enteredText()).includes(probe)) {
-      console.warn('⚠️ 输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
+      warn('⚠️ 输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
     }
 
     // 是否真的发出去：输入框是否已被清空（不再含原问题）
@@ -176,10 +177,10 @@ export class WenxinAdapter implements PlatformAdapter {
 
     // 1) 优先 Enter（贴合用户习惯）。发送前随机停顿 500–1000ms（模拟真人检查后发送）
     await this.page.waitForTimeout(randWaitMs(WENXIN_INPUT_PRE_ENTER));
-    console.log(`[${sec(Date.now())}] ⏎ 按 Enter 发送`);
+    log(`[${sec(Date.now())}] ⏎ 按 Enter 发送`);
     await this.page.keyboard.press('Enter');
     if (await isSent()) {
-      console.log(`[${sec(Date.now())}] ✅ 发送已确认（输入框已清空）`);
+      log(`[${sec(Date.now())}] ✅ 发送已确认（输入框已清空）`);
       return;
     }
 
@@ -187,11 +188,11 @@ export class WenxinAdapter implements PlatformAdapter {
     const send = await firstFound(this.page, this.selectors.sendButton);
     if (send) await send.locator.click().catch(() => {});
     if (await isSent()) {
-      console.log(`[${sec(Date.now())}] ✅ 发送已确认（点发送钮兜底成功）`);
+      log(`[${sec(Date.now())}] ✅ 发送已确认（点发送钮兜底成功）`);
       return;
     }
 
-    console.warn('⚠️ 发送未能确认（输入框仍含原问题），请人工检查发送交互');
+    warn('⚠️ 发送未能确认（输入框仍含原问题），请人工检查发送交互');
   }
 
   // 模拟真人逐字输入：单字录入，随机间隔 180–450ms（用户反馈更快速度仍"太快"）；
@@ -300,7 +301,7 @@ export class WenxinAdapter implements PlatformAdapter {
       // —— 结束判定 ⓪ 动作栏出现 = 明确完成（优先级最高，用户 2026-09-04 提议）——
       const bars = await countActionBar();
       if (bars > actionBaseline) {
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(0)}s] 🏁 检测到回答动作栏（复制/朗读/…），回答已完成（当前 ${lastLen ?? 0} 字）`
         );
         break;
@@ -309,21 +310,21 @@ export class WenxinAdapter implements PlatformAdapter {
       // —— 结束判定 ——
       // ① 主判定（明确元素驱动）：文本曾明显生长 + 流式胶囊已消失 + 连续 6s 无新增 → 完成
       if (everGrew >= 2 && !streaming && noGrowthStreak >= 6) {
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(0)}s] 🏁 回答文本已稳定（峰值 ${lastLen ?? 0} 字，胶囊消失，连续 6s 无新增）→ 完成`
         );
         break;
       }
       // ③ 安全网：文本已生长但胶囊异常长期不消失 → 连续 20s 无新增强制结束（防胶囊卡死导致空等超时）
       if (everGrew >= 2 && noGrowthStreak >= 20) {
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(0)}s] 🏁 文本已稳定 20s（胶囊状态异常但内容无变化）→ 完成`
         );
         break;
       }
       // ② 兜底（无增长信号：可能检索/风控/未返回）：连续 30s 无变化
       if (everGrew === 0 && noGrowthStreak >= 30) {
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(0)}s] 🏁 未见文本增长，连续 30s 无变化（兜底）→ 完成`
         );
         break;
@@ -332,7 +333,7 @@ export class WenxinAdapter implements PlatformAdapter {
       // —— 进度日志 ——
       if (Date.now() - lastProgressLog > 10000) {
         const phase = streaming ? '📝 回答流式输出中…' : everGrew >= 2 ? '⏳ 收尾中…' : '⏳ 检索/思考中…';
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(0)}s] ${phase}（容器 ${len === null ? '未出现' : len + ' 字'}）`
         );
         lastProgressLog = Date.now();
@@ -340,7 +341,7 @@ export class WenxinAdapter implements PlatformAdapter {
 
       await this.page.waitForTimeout(1000);
     }
-    console.log(`[${((Date.now() - start) / 1000).toFixed(0)}s] ✅ 回答输出完成，开始抽取`);
+    log(`[${((Date.now() - start) / 1000).toFixed(0)}s] ✅ 回答输出完成，开始抽取`);
     await this.page.waitForTimeout(800); // 收尾缓冲，确保末字渲染完整
   }
 
@@ -469,7 +470,7 @@ export class WenxinAdapter implements PlatformAdapter {
     if (mode === 'stitch') {
       // TODO(策略B)：页面原样不动 + 滚动容器 scrollTop 步进 + 每段普通视口截图 + sharp 纵向拼接。
       // ⚠️ fixed 元素（顶部导航/输入框）会逐段重复出现，拼接前需按段裁剪。
-      console.log('⚠️ 文心策略 B（滚动分段拼接）尚未实现，本次回退到策略 A（expand）');
+      log('⚠️ 策略 B（滚动分段拼接）尚未实现，本次回退到策略 A（expand）');
     }
     const page = this.page;
     const qaSel =
@@ -609,7 +610,7 @@ export class WenxinAdapter implements PlatformAdapter {
         };
       }, { sel: qaSel, qsel: qSel })
       .catch(() => null);
-    console.log('📐 qa box / 问题气泡诊断:', JSON.stringify(diag));
+    log('📐 qa box / 问题气泡诊断:', JSON.stringify(diag));
 
     const maskDiag = await page
       .evaluate((sel) => {
@@ -624,7 +625,7 @@ export class WenxinAdapter implements PlatformAdapter {
         return out;
       }, qaSel)
       .catch(() => []);
-    console.log('🎭 mask 诊断（qa 祖先链，应为空）:', JSON.stringify(maskDiag));
+    log('🎭 mask 诊断（qa 祖先链，应为空）:', JSON.stringify(maskDiag));
 
     const bubSnap = await page
       .evaluate((qsel) => {
@@ -643,12 +644,12 @@ export class WenxinAdapter implements PlatformAdapter {
         return rows;
       }, qSel)
       .catch(() => []);
-    console.log('🔬 气泡渲染快照（气泡→根）:', JSON.stringify(bubSnap));
+    log('🔬 气泡渲染快照（气泡→根）:', JSON.stringify(bubSnap));
 
     // ⑥ 元素级截图：边界 = qa 容器本身，Playwright 自己处理高于视口的滚动/拼接
     await qaLocator.screenshot({ path: outPath, animations: 'disabled', timeout: 60000 });
     const sz = fs.statSync(outPath).size;
-    console.log(`✂️ Q&A 长屏截图完成（文心·策略A：边界=chat-qa-container，问题→回答结束，${sz} bytes）`);
+    log(`✂️ Q&A 长屏截图完成（策略A：边界=chat-qa-container，问题→回答结束，${sz} bytes）`);
   }
 
 }

@@ -1,4 +1,5 @@
 import { Page, BrowserContext, Frame } from 'playwright';
+import { log, warn } from '../../log.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { QIANWEN_CANDIDATE_SELECTORS } from './selectors.js';
@@ -76,7 +77,7 @@ export class QianwenAdapter implements PlatformAdapter {
         })
         .catch(() => false);
     if (!(await focusedEditable())) {
-      console.warn('⚠️ 编辑器未获焦点，尝试 textarea 兜底聚焦');
+      warn('⚠️ 编辑器未获焦点，尝试 textarea 兜底聚焦');
       const ta = this.page.locator('textarea').first();
       await ta.click().catch(() => {});
       await ta.focus().catch(() => {});
@@ -100,7 +101,7 @@ export class QianwenAdapter implements PlatformAdapter {
         .catch(() => '');
     const probe = question.slice(0, Math.max(1, Math.floor(question.length / 2)));
     if (!(await enteredText()).includes(probe)) {
-      console.warn('⚠️ 输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
+      warn('⚠️ 输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
     }
 
     // 是否真的发出去：输入框是否已被清空（不再含原问题）
@@ -116,7 +117,7 @@ export class QianwenAdapter implements PlatformAdapter {
     if (send) await humanClick(this.page, this.selectors.sendButton.join(', '));
     if (await isSent()) return;
 
-    console.warn('⚠️ 发送未能确认（输入框仍含原问题），请人工检查发送交互');
+    warn('⚠️ 发送未能确认（输入框仍含原问题），请人工检查发送交互');
   }
 
   // 模拟真人逐字输入：单字录入，随机间隔 180–450ms；标点后断句长停顿；约 8% 概率随机「思考停顿」。
@@ -182,19 +183,19 @@ export class QianwenAdapter implements PlatformAdapter {
 
       // 完成判定（任一满足即收尾）：
       if (complete && noGrowth >= 2) {
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 回答完成标志 qk-markdown-complete 出现且文本稳定，当前 ${lastLen ?? 0} 字`
         );
         break;
       }
       if (everGrew && noGrowth >= 8) {
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 已生长后文本连续 8s 无增长（兜底），当前 ${lastLen ?? 0} 字`
         );
         break;
       }
       if (noGrowth >= 40) {
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 文本连续 40s 无增长（可能缓存/瞬时答案），当前 ${lastLen ?? 0} 字`
         );
         break;
@@ -202,7 +203,7 @@ export class QianwenAdapter implements PlatformAdapter {
 
       if (Date.now() - lastProgressLog > 10000) {
         const phase = complete ? '✅ 完成待稳定…' : everGrew ? '📝 回答流式输出中…' : '⏳ 检索/思考中…';
-        console.log(
+        log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] ${phase}（容器 ${len === null ? '未出现' : len + ' 字'}）`
         );
         lastProgressLog = Date.now();
@@ -210,7 +211,7 @@ export class QianwenAdapter implements PlatformAdapter {
 
       await this.page.waitForTimeout(1000);
     }
-    console.log(`[${((Date.now() - start) / 1000).toFixed(1)}s] ✅ 回答输出完成，开始抽取`);
+    log(`[${((Date.now() - start) / 1000).toFixed(1)}s] ✅ 回答输出完成，开始抽取`);
     await this.page.waitForTimeout(500); // 收尾缓冲
   }
 
@@ -414,14 +415,14 @@ export class QianwenAdapter implements PlatformAdapter {
           };
         }, this.selectors.sourceArea.join(', '))
         .catch((e) => {
-          if (attempt === 0) console.log(`[千问信源诊断] evaluate 异常：${(e as Error).message}`);
+          if (attempt === 0) log(`[信源诊断] evaluate 异常：${(e as Error).message}`);
           return null;
         });
       if (last && last.found && last.items.length > 0) break;
       await this.page.waitForTimeout(800);
     }
     if (!last) return null;
-    console.log(`[千问信源诊断] ${JSON.stringify(last.diag)}，抽到 ${last.items.length} 条`);
+    log(`[信源诊断] ${JSON.stringify(last.diag)}，抽到 ${last.items.length} 条`);
     // 全量扫描落盘（无论新旧哪种结构、抓到几条都落，便于校准"多结构并存"场景）：
     // 旧结构胶囊落点(docExtAnchors) / 新结构 favicon(img src 内 base64 key) / 全部 reference 容器 HTML。
     if (captureDir) {
@@ -463,7 +464,7 @@ export class QianwenAdapter implements PlatformAdapter {
       if (scan) {
         const p = path.join(captureDir, 'sources-scan.json');
         fs.writeFileSync(p, JSON.stringify(scan, null, 2));
-        console.log(`[千问信源诊断] 全量扫描已落盘：${path.relative(process.cwd(), p)}`);
+        log(`[信源诊断] 全量扫描已落盘：${path.relative(process.cwd(), p)}`);
       }
     }
     // 校准落盘：信源区在但最终 0 条 → 抓现场，区分"未挂载/挂载晚/挂载到别处(portal)"
@@ -498,7 +499,7 @@ export class QianwenAdapter implements PlatformAdapter {
       if (dump) {
         const p = path.join(captureDir, 'sources-debug.json');
         fs.writeFileSync(p, JSON.stringify(dump, null, 2));
-        console.log(`[千问信源诊断] 0 条现场已落盘：${path.relative(process.cwd(), p)}`);
+        log(`[信源诊断] 0 条现场已落盘：${path.relative(process.cwd(), p)}`);
       }
     }
     if (!last.found) return null;
@@ -543,7 +544,7 @@ export class QianwenAdapter implements PlatformAdapter {
   // 策略 B（stitch）：尚未实现，传入时回退 A 并打印警告。
   async captureQaScreenshot(outPath: string, mode: ScreenshotMode = 'expand'): Promise<void> {
     if (mode === 'stitch') {
-      console.log('⚠️ 千问策略 B（滚动分段拼接）尚未实现，本次回退到策略 A（expand）');
+      log('⚠️ 策略 B（滚动分段拼接）尚未实现，本次回退到策略 A（expand）');
     }
     const page = this.page;
     const qaSel =
@@ -682,7 +683,7 @@ export class QianwenAdapter implements PlatformAdapter {
         };
       }, { sel: qaSel, qsel: qSel })
       .catch(() => null);
-    console.log('📐 qa box / 问题气泡诊断:', JSON.stringify(diag));
+    log('📐 qa box / 问题气泡诊断:', JSON.stringify(diag));
 
     const maskDiag = await page
       .evaluate((sel) => {
@@ -697,7 +698,7 @@ export class QianwenAdapter implements PlatformAdapter {
         return out;
       }, qaSel)
       .catch(() => []);
-    console.log('🎭 mask 诊断（qa 祖先链，应为空）:', JSON.stringify(maskDiag));
+    log('🎭 mask 诊断（qa 祖先链，应为空）:', JSON.stringify(maskDiag));
 
     const bubSnap = await page
       .evaluate((qsel) => {
@@ -716,12 +717,12 @@ export class QianwenAdapter implements PlatformAdapter {
         return rows;
       }, qSel)
       .catch(() => []);
-    console.log('🔬 气泡渲染快照（气泡→根）:', JSON.stringify(bubSnap));
+    log('🔬 气泡渲染快照（气泡→根）:', JSON.stringify(bubSnap));
 
     // ⑥ 元素级截图：边界 = 最新 chat-round（问题开始 → 回答结束）
     await qaLocator.screenshot({ path: outPath, animations: 'disabled', timeout: 60000 });
     const sz = fs.statSync(outPath).size;
-    console.log(`✂️ Q&A 长屏截图完成（千问·策略A：边界=chat-round.last，问题→回答结束，${sz} bytes）`);
+    log(`✂️ Q&A 长屏截图完成（策略A：边界=chat-round.last，问题→回答结束，${sz} bytes）`);
   }
 
   // 关闭千问首屏营销弹层。存在两种形态（2026-09-01 实测）：
@@ -739,7 +740,7 @@ export class QianwenAdapter implements PlatformAdapter {
     if (carouselCount > 0) {
       const closeBtn = carousel.locator('button[aria-label="关闭"]').first();
       if ((await closeBtn.count()) > 0) {
-        console.log('🛡️ 检测到千问居中轮播弹窗，稍作停顿后仿人类点击关闭…');
+        log('🛡️ 检测到居中轮播弹窗，稍作停顿后仿人类点击关闭…');
         await humanDelay(...QIANWEN_AD_A_DETECT_PAUSE);
         const box = await closeBtn.boundingBox().catch(() => null);
         if (box) {
@@ -760,10 +761,10 @@ export class QianwenAdapter implements PlatformAdapter {
           .then(() => true)
           .catch(() => false);
         if (gone) {
-          console.log('✅ 千问居中轮播弹窗已关闭');
+          log('✅ 居中轮播弹窗已关闭');
           closed = true;
         } else {
-          console.log('⚠️ 轮播弹窗关闭钮已点，弹窗仍未消失');
+          log('⚠️ 轮播弹窗关闭钮已点，弹窗仍未消失');
         }
         await this.page.waitForTimeout(500);
       }
@@ -791,7 +792,7 @@ export class QianwenAdapter implements PlatformAdapter {
     if (card) {
       const closeBtn = card.locator('button[aria-label="关闭"]');
       if ((await closeBtn.count()) > 0) {
-        console.log('🛡️ 检测到千问底部广告横幅，悬停显示关闭钮后仿人类点击…');
+        log('🛡️ 检测到底部广告横幅，悬停显示关闭钮后仿人类点击…');
         await humanDelay(...QIANWEN_AD_B_PRE_HOVER);
         await card.hover();
         await humanDelay(...QIANWEN_AD_B_POST_HOVER);
@@ -825,16 +826,16 @@ export class QianwenAdapter implements PlatformAdapter {
           .then(() => true)
           .catch(() => false);
         if (gone) {
-          console.log('✅ 千问底部广告横幅已关闭');
+          log('✅ 底部广告横幅已关闭');
           closed = true;
         } else {
-          console.log('⚠️ 已点击底部横幅关闭钮，横幅未从 DOM 移除（继续后续流程）');
+          log('⚠️ 已点击底部横幅关闭钮，横幅未从 DOM 移除（继续后续流程）');
           closed = true; // 点过也算处理过，避免外层报错
         }
       }
     }
 
-    if (!closed) console.log('🛡️ 未发现千问营销弹层');
+    if (!closed) log('🛡️ 未发现营销弹层');
     return closed;
   }
 
@@ -880,7 +881,7 @@ export class QianwenAdapter implements PlatformAdapter {
     for (let i = 0; i < MONITOR_ITERS; i++) {
       if (await detectModal()) {
         detected = true;
-        console.log(`🔒 第 ${i + 1} 次轮询检测到 baxia 验证弹窗`);
+        log(`🔒 第 ${i + 1} 次轮询检测到 baxia 验证弹窗`);
         break;
       }
       await this.page.waitForTimeout(MONITOR_GAP);
@@ -888,10 +889,10 @@ export class QianwenAdapter implements PlatformAdapter {
     if (!detected) {
       // 刷新重开后若**没有**再弹验证码 → 重发的问题已被直接接受，视为通过（不能当失败再刷）。
       if (refreshCount > 0) {
-        console.log('✅ 刷新重开后未再触发滑动验证，问题已发送成功');
+        log('✅ 刷新重开后未再触发滑动验证，问题已发送成功');
         return true;
       }
-      console.log('🔓 未检测到千问滑动验证弹窗');
+      log('🔓 未检测到滑动验证弹窗');
       if (sub) {
         try {
           fs.writeFileSync(path.join(sub, 'page-dump.html'), await this.page.content());
@@ -913,7 +914,7 @@ export class QianwenAdapter implements PlatformAdapter {
         await this.page.screenshot({ path: path.join(sub, 'captcha.png') });
         fs.writeFileSync(path.join(sub, 'modal-dump.html'), await this.page.content());
       } catch (e) {
-        console.log(`⚠️ 验证码现场抓取失败：${(e as Error).message}`);
+        log(`⚠️ 验证码现场抓取失败：${(e as Error).message}`);
       }
     }
 
@@ -940,7 +941,7 @@ export class QianwenAdapter implements PlatformAdapter {
         const iframeHtml = await frame.content();
         fs.writeFileSync(path.join(sub, 'iframe-content-initial.html'), iframeHtml);
       } catch (e) {
-        console.log(`⚠️ iframe 初始 HTML 落盘失败：${(e as Error).message}`);
+        log(`⚠️ iframe 初始 HTML 落盘失败：${(e as Error).message}`);
       }
     }
 
@@ -969,7 +970,7 @@ export class QianwenAdapter implements PlatformAdapter {
           })
           .catch(() => null);
         if (boxes) {
-          console.log('🎯 baxia iframe 滑块已就绪（Aliyun 标准类）');
+          log('🎯 baxia iframe 滑块已就绪（Aliyun 标准类）');
           return boxes;
         }
         await this.page.waitForTimeout(600);
@@ -1036,7 +1037,7 @@ export class QianwenAdapter implements PlatformAdapter {
         })
         .catch(() => null);
       if (info) {
-        console.log('🎯 baxia iframe 滑块已就绪（几何回退）');
+        log('🎯 baxia iframe 滑块已就绪（几何回退）');
         sliderInfo = info;
       }
     }
@@ -1047,12 +1048,12 @@ export class QianwenAdapter implements PlatformAdapter {
         const iframeHtml = await frame.content();
         fs.writeFileSync(path.join(sub, 'iframe-content-ready.html'), iframeHtml);
       } catch (e) {
-        console.log(`⚠️ iframe 就绪 HTML 落盘失败：${(e as Error).message}`);
+        log(`⚠️ iframe 就绪 HTML 落盘失败：${(e as Error).message}`);
       }
     }
 
     if (!sliderInfo) {
-      console.log('⚠️ 无法在 baxia iframe 内定位滑块/轨道');
+      log('⚠️ 无法在 baxia iframe 内定位滑块/轨道');
       return this.retryOrManual(captureDir, restart, refreshCount, detectModal, sub, '无法在 baxia iframe 内定位滑块/轨道');
     }
 
@@ -1173,7 +1174,7 @@ export class QianwenAdapter implements PlatformAdapter {
         .catch(() => null);
     };
 
-    console.log('🔍 拖动前滑块状态:', JSON.stringify(await readSliderState()));
+    log('🔍 拖动前滑块状态:', JSON.stringify(await readSliderState()));
 
     // 重试若干次：每次都用"全新随机真人轨迹"拖到底。阿里风控是按单次轨迹判定的，
     // 换换节奏/落点常能蹭过一次；失败则点击重试框换新挑战再试。
@@ -1183,7 +1184,7 @@ export class QianwenAdapter implements PlatformAdapter {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       // 新一轮前先确认弹窗是否还在；若已消失说明上一轮其实已通过（轮询竞态兜底，避免漏检成功）
       if (!(await detectModal())) {
-        console.log('✅ 滑动验证通过（弹窗已消失）');
+        log('✅ 滑动验证通过（弹窗已消失）');
         return true;
       }
 
@@ -1195,7 +1196,7 @@ export class QianwenAdapter implements PlatformAdapter {
         attempt === 1
           ? randWaitMs(QIANWEN_CAPTCHA_FIRST_PREWAIT) // 用户 2026-09-02：弹窗出现后 1~3s 最佳
           : randWaitMs(QIANWEN_CAPTCHA_RETRY_PREWAIT); // 用户 2026-09-02：失败后 1~2s
-      console.log(
+      log(
         attempt === 1
           ? `⏱️ 首次滑动前随机等待 ${(preWait / 1000).toFixed(1)}s（模拟真人发呆/读题）…`
           : `⏱️ 第 ${attempt} 次重试前随机等待 ${(preWait / 1000).toFixed(1)}s…`
@@ -1213,29 +1214,29 @@ export class QianwenAdapter implements PlatformAdapter {
         await this.page.waitForTimeout(300);
       }
       if (!frame) {
-        console.log('⚠️ 重试时无法定位 baxia iframe');
+        log('⚠️ 重试时无法定位 baxia iframe');
         return this.retryOrManual(captureDir, restart, refreshCount, detectModal, sub, '重试时无法定位 baxia iframe');
       }
 
       const iframeBox = await this.page.locator('#baxia-dialog-content').boundingBox();
       if (!iframeBox) {
-        console.log('⚠️ 无法获取 baxia iframe 位置');
+        log('⚠️ 无法获取 baxia iframe 位置');
         return this.retryOrManual(captureDir, restart, refreshCount, detectModal, sub, '无法获取 baxia iframe 位置');
       }
 
       // 把手位置重读；读不到说明 iframe 还没渲染出滑块，等一下
       let hc = await readHandle();
       if (!hc) {
-        console.log(`⚠️ 第 ${attempt} 次拖动前重读把手失败，等待新滑块渲染…`);
+        log(`⚠️ 第 ${attempt} 次拖动前重读把手失败，等待新滑块渲染…`);
         const re = await waitForSliderReady(frame);
         if (!re) {
-          console.log('⚠️ 未能重新定位滑块');
+          log('⚠️ 未能重新定位滑块');
           return this.retryOrManual(captureDir, restart, refreshCount, detectModal, sub, '未能重新定位滑块');
         }
         sliderInfo = re;
         hc = await readHandle();
         if (!hc) {
-          console.log('⚠️ 新滑块把手仍定位不到');
+          log('⚠️ 新滑块把手仍定位不到');
           return this.retryOrManual(captureDir, restart, refreshCount, detectModal, sub, '新滑块把手仍定位不到');
         }
       }
@@ -1244,7 +1245,7 @@ export class QianwenAdapter implements PlatformAdapter {
       // 之前也校验过一次 hc，但这里再做一次 sanity 防止从读到拖之间的几 ms 内 iframe 又重渲染
       hc = await readHandle();
       if (!hc) {
-        console.log('⚠️ 拖前最后校验把手时丢失，重新…');
+        log('⚠️ 拖前最后校验把手时丢失，重新…');
         const re = await waitForSliderReady(frame);
         if (!re) return this.retryOrManual(captureDir, restart, refreshCount, detectModal, sub, '拖前最后校验把手时丢失');
         sliderInfo = re;
@@ -1253,7 +1254,7 @@ export class QianwenAdapter implements PlatformAdapter {
       }
       const iframeBoxFinal = await this.page.locator('#baxia-dialog-content').boundingBox();
       if (!iframeBoxFinal) {
-        console.log('⚠️ 拖前最后校验 iframe 位置时丢失');
+        log('⚠️ 拖前最后校验 iframe 位置时丢失');
         return this.retryOrManual(captureDir, restart, refreshCount, detectModal, sub, '拖前最后校验 iframe 位置时丢失');
       }
 
@@ -1266,7 +1267,7 @@ export class QianwenAdapter implements PlatformAdapter {
       const jitter = Math.floor(Math.random() * 8) - 2;
       const targetX = fromX + travel + jitter;
       const targetY = fromY;
-      console.log(`🖱️ 第 ${attempt}/${MAX_ATTEMPTS} 次仿人类滑动（位移≈${Math.round(travel + jitter)}px）…`);
+      log(`🖱️ 第 ${attempt}/${MAX_ATTEMPTS} 次仿人类滑动（位移≈${Math.round(travel + jitter)}px）…`);
       // 每轮步数随机：节奏各不相同，避���固定步数被风控按「机器」标记。
       // ⚠️ 用户 2026-09-02 反馈「滑动太慢，提速 0.5 倍」→ 步数由 40~64 降为 27~43（/1.5），
       //    整体时长由约 0.5~0.8s 降到约 0.35~0.55s，仍在真人手速区间（人手拖滑块通常 0.3~0.6s）。
@@ -1335,14 +1336,14 @@ export class QianwenAdapter implements PlatformAdapter {
       if (outcome === 'success') {
         await this.page.waitForTimeout(2000);
         if ((await readOutcome()) === 'failed') {
-          console.log(`⚠️ 第 ${attempt} 次终点态后延迟出现失败标记，降级为失败重试…`);
+          log(`⚠️ 第 ${attempt} 次终点态后延迟出现失败标记，降级为失败重试…`);
           outcome = 'failed';
         }
       }
-      console.log(`📋 第 ${attempt} 次轮询明细:`, pollLog.join(' | '));
+      log(`📋 第 ${attempt} 次轮询明细:`, pollLog.join(' | '));
 
       const after = await readSliderState();
-      console.log(`🔍 第 ${attempt} 次拖动后滑块状态:`, JSON.stringify(after), '判定:', outcome);
+      log(`🔍 第 ${attempt} 次拖动后滑块状态:`, JSON.stringify(after), '判定:', outcome);
       if (sub) {
         try {
           await this.page.screenshot({ path: path.join(sub, `after-drag-${attempt}.png`) });
@@ -1353,7 +1354,7 @@ export class QianwenAdapter implements PlatformAdapter {
       }
 
       if (outcome === 'success') {
-        console.log(`✅ 滑动验证通过（第 ${attempt} 次）`);
+        log(`✅ 滑动验证通过（第 ${attempt} 次）`);
         return true;
       }
 
@@ -1364,12 +1365,12 @@ export class QianwenAdapter implements PlatformAdapter {
       const explicitFail = (await readOutcome()) === 'failed';
       const endReached = await reachedEnd();
       if (explicitFail) {
-        console.log(`⚠️ 第 ${attempt} 次明确失败（验证失败），点击重试框换新挑战…`);
+        log(`⚠️ 第 ${attempt} 次明确失败（验证失败），点击重试框换新挑战…`);
         const clicked = await clickRetry();
         if (!clicked) {
-          console.log('⚠️ 未找到重试框（可能已自动关闭），检查弹窗状态…');
+          log('⚠️ 未找到重试框（可能已自动关闭），检查弹窗状态…');
           if (!(await detectModal())) {
-            console.log('✅ 滑动验证通过');
+            log('✅ 滑动验证通过');
             return true;
           }
         }
@@ -1378,7 +1379,7 @@ export class QianwenAdapter implements PlatformAdapter {
         //    去点容器刷新，结果把已完成的挑战重置/触发重载 → 滑块不再渲染 → 卡死进人工模式
         //    （用户实测首滑已过却卡死）。修法：绝不刷新，改为延长等待服务器确认（弹窗关闭=成功；
         //    出现 errloading=失败）；仍卡住则转人工，避免破坏已提交态。
-        console.log(`✅ 第 ${attempt} 次滑块已到终点且无失败标记，延长等待服务器确认（不刷新）…`);
+        log(`✅ 第 ${attempt} 次滑块已到终点且无失败标记，延长等待服务器确认（不刷新）…`);
         let confirmed: 'success' | 'failed' | 'pending' = 'pending';
         for (let w = 0; w < 10; w++) {
           await this.page.waitForTimeout(1000);
@@ -1386,28 +1387,28 @@ export class QianwenAdapter implements PlatformAdapter {
           if ((await readOutcome()) === 'failed') { confirmed = 'failed'; break; }
         }
         if (confirmed === 'success') {
-          console.log(`✅ 滑动验证通过（第 ${attempt} 次，终点态确认）`);
+          log(`✅ 滑动验证通过（第 ${attempt} 次，终点态确认）`);
           return true;
         }
         if (confirmed === 'failed') {
-          console.log(`⚠️ 延长等待期间出现失败标记，点击重试框换新挑战…`);
+          log(`⚠️ 延长等待期间出现失败标记，点击重试框换新挑战…`);
           const clicked = await clickRetry();
-          if (!clicked && !(await detectModal())) { console.log('✅ 滑动验证通过'); return true; }
+          if (!clicked && !(await detectModal())) { log('✅ 滑动验证通过'); return true; }
         } else {
-          console.log('⚠️ 滑块已到终点但服务器长时间未确认');
+          log('⚠️ 滑块已到终点但服务器长时间未确认');
           return this.retryOrManual(captureDir, restart, refreshCount, detectModal, sub, '滑块已到终点但服务器长时间未确认');
         }
       } else {
         // 结果未定且滑块未到终点：可能卡在「加载中/验证中」或挑战损坏。点容器强制换新挑战。
-        console.log(`⚠️ 第 ${attempt} 次结果未定，多等 3s 复查…`);
+        log(`⚠️ 第 ${attempt} 次结果未定，多等 3s 复查…`);
         await this.page.waitForTimeout(3000);
         const st2 = await readOutcome();
         if (st2 === 'success') {
-          console.log('✅ 滑动验证通过（延迟确认成功）');
+          log('✅ 滑动验证通过（延迟确认成功）');
           return true;
         }
         if (st2 !== 'failed') {
-          console.log(`⚠️ 第 ${attempt} 次仍未定（可能卡在加载），点击容器强制换新挑战…`);
+          log(`⚠️ 第 ${attempt} 次仍未定（可能卡在加载），点击容器强制换新挑战…`);
           const ib = await this.page.locator('#baxia-dialog-content').boundingBox();
           if (ib) {
             const f = latestFrame();
@@ -1451,10 +1452,10 @@ export class QianwenAdapter implements PlatformAdapter {
         await this.page.waitForTimeout(4000);
         const st3 = await readOutcome();
         if (!(await detectModal()) || st3 === 'success') {
-          console.log('✅ 滑动验证通过（复查确认）');
+          log('✅ 滑动验证通过（复查确认）');
           return true;
         }
-        console.log('⚠️ 重试后未能重新渲染滑块');
+        log('⚠️ 重试后未能重新渲染滑块');
         return this.retryOrManual(captureDir, restart, refreshCount, detectModal, sub, '重试后未能重新渲染滑块');
       }
       frame = reFrame ?? frame;
@@ -1487,17 +1488,17 @@ export class QianwenAdapter implements PlatformAdapter {
   ): Promise<boolean> {
     const MAX_REFRESH = 3;
     if (restart && refreshCount < MAX_REFRESH) {
-      console.log(`🔄 ${reason} → 第 ${refreshCount + 1}/${MAX_REFRESH} 次刷新页面重开…`);
+      log(`🔄 ${reason} → 第 ${refreshCount + 1}/${MAX_REFRESH} 次刷新页面重开…`);
       try {
         await restart();
       } catch (e) {
-        console.log(`⚠️ 刷新重开失败：${(e as Error).message}，进入等待人工滑动模式`);
+        log(`⚠️ 刷新重开失败：${(e as Error).message}，进入等待人工滑动模式`);
         return this.waitForManualSlide(detectModal, sub);
       }
       // 递归重跑完整流程：重新监控弹窗 → 重新等滑块就绪 → 重新滑
       return this.solveCaptcha(captureDir, restart, refreshCount + 1);
     }
-    console.log(
+    log(
       restart
         ? `⚠️ ${reason}，且刷新重开 ${MAX_REFRESH} 次仍未通过，进入等待人工滑动模式`
         : `⚠️ ${reason}（调用方未提供刷新重开能力），进入等待人工滑动模式`
@@ -1507,14 +1508,14 @@ export class QianwenAdapter implements PlatformAdapter {
 
   // 等待人工滑动（不卡死 run）
   private async waitForManualSlide(detectModal: () => Promise<boolean>, sub: string | null): Promise<boolean> {
-    console.log('⏳ 请手动滑动验证码，程序会自动继续…');
+    log('⏳ 请手动滑动验证码，程序会自动继续…');
     const deadline = Date.now() + 120000;
     let m = 0;
     while (Date.now() < deadline) {
       await this.page.waitForTimeout(2000);
       const still = await detectModal();
       if (!still) {
-        console.log('✅ 人工滑动已通过，继续诊断');
+        log('✅ 人工滑动已通过，继续诊断');
         return true;
       }
       if (sub && m % 6 === 0) {
@@ -1526,7 +1527,7 @@ export class QianwenAdapter implements PlatformAdapter {
       }
       m++;
     }
-    console.log('⚠️ 等待人工滑动超时（120s），本次按未通过继续');
+    log('⚠️ 等待人工滑动超时（120s），本次按未通过继续');
     return false;
   }
 }

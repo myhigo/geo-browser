@@ -1,4 +1,5 @@
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
+import { log, err, withLogScope } from '../log.js';
 import fs from 'fs';
 import path from 'path';
 import { resolvePlatform, PlatformDef } from '../platforms/index.js';
@@ -87,6 +88,18 @@ async function runDiagnosticInner(
   retried: boolean
 ): Promise<DiagnosticResult> {
   const def: PlatformDef = resolvePlatform(opts.platform || 'doubao');
+  // 日志作用域 = 模型名 · 关键词，本轮所有日志自动带此前缀
+  return withLogScope(`${def.label}·${question}`, () =>
+    runDiagnosticScoped(question, opts, retried, def)
+  );
+}
+
+async function runDiagnosticScoped(
+  question: string,
+  opts: LaunchOpts,
+  retried: boolean,
+  def: PlatformDef
+): Promise<DiagnosticResult> {
   const url = opts.url || def.defaultUrl;
 
   const headless = opts.headless ?? process.env.GEO_HEADLESS === '1';
@@ -98,9 +111,9 @@ async function runDiagnosticInner(
     if (dps) {
       proxy = dps;
       usedDps = true;
-      console.log(`🌐 [dps] 本次使用动态代理：${dps.server}`);
+      log(`🌐 [dps] 本次使用动态代理：${dps.server}`);
     } else {
-      console.log(`⚠️ [dps] 取动态代理失败，回退到${opts.proxy ? '账号绑定代理' : '直连'}`);
+      log(`⚠️ [dps] 取动态代理失败，回退到${opts.proxy ? '账号绑定代理' : '直连'}`);
     }
   }
   const launchOpts: {
@@ -161,7 +174,7 @@ async function runDiagnosticInner(
       ...contextOpts,
     });
     browser = context.browser() as Browser; // 持久上下文自带浏览器实例，关闭时一起关
-    console.log(`👤 持久登录 profile：${path.resolve(opts.userDataDir)}（首次使用需人工登录一次）`);
+    log(`👤 持久登录 profile：${path.resolve(opts.userDataDir)}（首次使用需人工登录一次）`);
   } else {
     browser = await chromium.launch(launchOpts);
     context = await browser.newContext(contextOpts);
@@ -208,8 +221,8 @@ async function runDiagnosticInner(
   // 直接复用它，避免出现「一个 blank + 一个业务页」两个标签。
   const page: Page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
   // 打印目录，便于排查「发送后弹出访达窗口」现象：对比访达标题栏路径是否与下面一致
-  console.log(`📂 工作目录：${process.cwd()}`);
-  console.log(`📂 本次样本库目录：${root}`);
+  log(`📂 工作目录：${process.cwd()}`);
+  log(`📂 本次样本库目录：${root}`);
   const adapter = def.create(page, context);
 
   const notes: string[] = [];
@@ -244,7 +257,7 @@ async function runDiagnosticInner(
         if (isBlank && !(targetHost && curUrl.includes(targetHost))) {
           // 真·白屏/未命中目标域：可能是站点瞬时慢（首屏资源持续加载），重试一次再判失败，
           // 避免偶发网络慢导致整轮卡在 about:blank 空标签。
-          console.log('⚠️ 导航超时且页面仍空白，等待 3s 重试一次…');
+          log('⚠️ 导航超时且页面仍空白，等待 3s 重试一次…');
           await page.waitForTimeout(3000);
           await page
             .goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
@@ -289,8 +302,8 @@ async function runDiagnosticInner(
               },
               { timeout: 8000 }
             )
-            .then(() => console.log(`👤 [${tag}] 登录态水合完成`))
-            .catch(() => console.log(`👤 [${tag}] 登录态水合超时（继续）`));
+            .then(() => log(`👤 [${tag}] 登录态水合完成`))
+            .catch(() => log(`👤 [${tag}] 登录态水合超时（继续）`));
         await waitHydrate('登录态水合');
         // 超时仍处未登录遮罩 → 重新加载，强制 SPA 重新从 cookie 初始化登录态（首屏未登录加载后不会自动重 hydrate）
         const stillUnlogin = await page
@@ -300,7 +313,7 @@ async function runDiagnosticInner(
           })
           .catch(() => false);
         if (stillUnlogin) {
-          console.log('👤 水合超时仍处未登录，重新加载页面以重新初始化登录态…');
+          log('👤 水合超时仍处未登录，重新加载页面以重新初始化登录态…');
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
           await page.waitForTimeout(1500);
           await waitHydrate('重载后水合');
@@ -326,7 +339,7 @@ async function runDiagnosticInner(
       // 轮询「是否已出现输入框」作为登录成功的判定，与平台登录方式（短信/扫码/第三方）无关。
       if (loginRequired && opts.waitLoginMs && opts.waitLoginMs > 0 && opts.userDataDir) {
         const deadline = Date.now() + opts.waitLoginMs;
-        console.log(
+        log(
           `\n🔑 请在弹出的浏览器窗口中手动登录「${def.label}」（最多等待 ${Math.round(opts.waitLoginMs / 1000)}s）…\n` +
             `   登录完成后无需任何操作，本程序会自动继续。\n`
         );
@@ -340,7 +353,7 @@ async function runDiagnosticInner(
         }
         if (loggedAt) {
           loginRequired = false;
-          console.log('✅ 登录已生效，等待页面稳定后继续诊断');
+          log('✅ 登录已生效，等待页面稳定后继续诊断');
           // 登录后页面通常会跳转/刷新 → 回到目标聊天页，再补一份「已登录」的 before 现场
           await page.waitForTimeout(2000);
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
@@ -532,19 +545,19 @@ async function runDiagnosticInner(
     };
     fs.writeFileSync(path.join(root, 'result.json'), JSON.stringify(result, null, 2));
     await writeReport(root, result, def.label);
-    console.log(`✅ 诊断完成（部分失败也会留现场），样本库：${path.relative(process.cwd(), root)}`);
+    log(`✅ 诊断完成（部分失败也会留现场），样本库：${path.relative(process.cwd(), root)}`);
   } catch (e) {
     notes.push(`❌ 诊断异常：${(e as Error).message}`);
-    console.error('诊断异常：', (e as Error).message);
+    err('诊断异常：', (e as Error).message);
   } finally {
     await context.close().catch(() => {});
     await browser.close().catch(() => {});
   }
 
-  notes.forEach((n) => console.log(n));
+  notes.forEach((n) => log(n));
   if (!result) {
     if (usedDps && !retried) {
-      console.log('⚠️ [dps] 任务未完成，换新 IP 重试一次');
+      log('⚠️ [dps] 任务未完成，换新 IP 重试一次');
       return runDiagnosticInner(question, opts, true);
     }
     throw new Error(notes.filter((n) => n.includes('❌')).join('；') || '诊断未完成');
