@@ -1,4 +1,4 @@
-// MySQL 连接池。惰性创建：只有 storage=mysql 时才会真正连库。
+// MySQL 连接池。本项目仅支持 MySQL，连接池在首次访问时惰性创建。
 // ⚠️ 连不上就快速失败并给出明确原因，绝不静默降级到文件存储（那会导致"以为写库了其实写文件"）。
 
 import mysql from 'mysql2/promise';
@@ -17,8 +17,8 @@ export function dbPool(): Pool {
   ].filter(Boolean) as string[];
   if (missing.length) {
     throw new Error(
-      `storage=mysql 但缺少数据库配置：${missing.join('、')}。` +
-        `请在环境变量中补齐，或设置 GEO_STORAGE=file 使用本地文件存储。`
+      `缺少数据库配置：${missing.join('、')}。` +
+        `本项目仅支持 MySQL，请在环境变量中补齐 DB_HOST、DB_USER、DB_NAME。`
     );
   }
   pool = mysql.createPool({

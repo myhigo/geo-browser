@@ -55,9 +55,6 @@ const bool = (k: string, d: boolean): boolean => {
 /** 产物模式：none=不落盘（生产默认）；debug=落 diagnostics/ 供选择器校准 */
 export type ArtifactMode = 'none' | 'debug';
 
-/** 存储后端：file=本地 json（开发用）；mysql=数据库（生产用） */
-export type StorageBackend = 'file' | 'mysql';
-
 export interface DbConfig {
   host: string;
   port: number;
@@ -79,8 +76,8 @@ export interface DpsConfig {
 export interface AppConfig {
   /** 本节点标识：账号归属哪台机器（多机时挑号只挑本节点的账号） */
   nodeId: string;
-  /** 账号台账等结构化状态存哪 */
-  storage: StorageBackend;
+  /** 账号台账等结构化状态存哪（本项目仅支持 MySQL） */
+  storage: 'mysql';
   db: DbConfig;
   /** API 端口 */
   port: number;
@@ -168,8 +165,8 @@ const basePath = normalizeBasePath(env('GEO_BASE_PATH'));
 export const config: AppConfig = {
   nodeId: env('GEO_NODE_ID') ?? 'default',
   basePath,
-  // 本地 Chrome 版默认 file（json 台账）；容器/多机部署才显式设 GEO_STORAGE=mysql
-  storage: env('GEO_STORAGE') === 'mysql' ? 'mysql' : 'file',
+  // 本项目仅支持数据库存储（MySQL），不再提供本地文件模式
+  storage: 'mysql',
   db: {
     host: env('DB_HOST') ?? '',
     port: num('DB_PORT', 3306),
@@ -228,10 +225,6 @@ export const paths = {
   },
   get siteNamesFile(): string {
     return path.resolve(config.dataRoot, 'site-names.json');
-  },
-  /** 代理 IP 池（file 模式） */
-  get proxiesFile(): string {
-    return path.resolve(config.dataRoot, 'proxies.json');
   },
   /** 服务日志（deploy/run.sh 重定向产出，路径需与其保持一致） */
   get logFile(): string {

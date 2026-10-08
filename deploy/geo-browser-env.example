@@ -3,9 +3,6 @@
 # 本文件是公开模板，不要填真实密码。
 # 改动在下次启动时生效（启动脚本自动读取 geo-browser-env）。
 
-# 存储：file=本地 json 台账；mysql=写数据库（需配下方 DB_*）
-GEO_STORAGE=file
-
 # 产物落盘：debug=截图/页面存档落盘（目录见 GEO_DATA_ROOT）；none=不落盘
 GEO_ARTIFACT_MODE=debug
 
@@ -51,7 +48,7 @@ GEO_MAX_SLOTS=0
 # 直连、不走代理的域名（逗号分隔）：把静态资源甩给本机带宽，仅对话 API 走代理
 GEO_PROXY_BYPASS="lf-flow-web-cdn.doubao.com,p3-pc.douyinpic.com,p9-pc.douyinpic.com,sf16-va.tiktokcdn.com,fonts.googleapis.com,fonts.gstatic.com"
 
-# ===== MySQL（仅 GEO_STORAGE=mysql 时需要）=====
+# ===== MySQL（必填，本项目仅支持数据库存储）=====
 DB_HOST=127.0.0.1
 DB_PORT=3306
 DB_USER=root

@@ -1,13 +1,7 @@
-// 账号台账仓储层。
-//
-// 两种实现：
-//   FileAccountRepo  —— 本地 json（GEO_STORAGE=file，本机开发用）
-//   MysqlAccountRepo —— 数据库（默认，生产用）
-// 上层只依赖 AccountRepo 接口，切换后端零改动。接口一律异步（MySQL 天然异步）。
+// 账号台账仓储层（MySQL 实现）。
 //
 // 上层 Account.id 即库里的 account_code（如 doubao-1），自增 id 仅库内使用。
 
-import fs from 'fs';
 import path from 'path';
 import { paths, config } from '../config/index.js';
 import { dbPool } from '../db/pool.js';
@@ -58,95 +52,6 @@ export const profileDirOf = (platformId: string, seq: number): string =>
 export const accountDirOf = (accountId: string): string =>
   path.join(paths.profilesRoot, accountId);
 
-// ─────────────────────────── 文件实现 ───────────────────────────
-
-const ledgerFileOf = (platformId: string): string =>
-  path.join(paths.profilesRoot, `${platformId}.accounts.json`);
-const legacyStateFileOf = (platformId: string): string =>
-  path.join(paths.profilesRoot, `${platformId}.login.json`);
-
-export class FileAccountRepo implements AccountRepo {
-  async list(platformId: string): Promise<Account[]> {
-    try {
-      return (JSON.parse(fs.readFileSync(ledgerFileOf(platformId), 'utf-8')) as Account[]).reverse()
-        .map((a) => ({ ...a, dir: accountDirOf(a.id), ipMode: (a.ipMode ?? 'local') as 'local' | 'static' | 'dynamic' }));
-    } catch {
-      return this.migrateLegacy(platformId);
-    }
-  }
-
-  /** 无台账时尝试迁移旧版「单身份」文件 */
-  private migrateLegacy(platformId: string): Account[] {
-    let migrated: Account[] = [];
-    try {
-      const old = JSON.parse(fs.readFileSync(legacyStateFileOf(platformId), 'utf-8')) as {
-        status?: string;
-        note?: string;
-        createdAt?: number;
-        lastUsedAt?: number;
-        todayQueries?: number;
-        consecutiveFails?: number;
-      };
-      migrated = [
-        {
-          id: `${platformId}-1`,
-          dir: accountDirOf(`${platformId}-1`),
-          remark: '账号1',
-          status: (['active', 'failed', 'cooling'].includes(old.status ?? '')
-            ? old.status
-            : 'none') as AccountStatus,
-          note: old.note,
-          createdAt: old.createdAt,
-          lastUsedAt: old.lastUsedAt,
-          todayQueries: old.todayQueries ?? 0,
-          consecutiveFails: old.consecutiveFails ?? 0,
-          ipMode: 'local',
-        },
-      ];
-      fs.rmSync(legacyStateFileOf(platformId), { force: true });
-      this.saveSync(platformId, migrated);
-    } catch {
-      migrated = [];
-    }
-    return migrated;
-  }
-
-  async get(platformId: string, accountId: string): Promise<Account | undefined> {
-    return (await this.list(platformId)).find((a) => a.id === accountId);
-  }
-
-  async patch(
-    platformId: string,
-    accountId: string,
-    patch: Partial<Account>
-  ): Promise<Account | undefined> {
-    const accounts = await this.list(platformId);
-    const idx = accounts.findIndex((a) => a.id === accountId);
-    if (idx < 0) return undefined;
-    accounts[idx] = { ...accounts[idx], ...patch };
-    this.saveSync(platformId, accounts);
-    return accounts[idx];
-  }
-
-  async add(platformId: string, account: Account): Promise<void> {
-    const accounts = await this.list(platformId);
-    accounts.push(account);
-    this.saveSync(platformId, accounts);
-  }
-
-  async remove(platformId: string, accountId: string): Promise<void> {
-    const accounts = await this.list(platformId);
-    this.saveSync(
-      platformId,
-      accounts.filter((a) => a.id !== accountId)
-    );
-  }
-
-  private saveSync(platformId: string, accounts: Account[]): void {
-    fs.mkdirSync(paths.profilesRoot, { recursive: true });
-    fs.writeFileSync(ledgerFileOf(platformId), JSON.stringify(accounts, null, 2));
-  }
-}
 
 // ─────────────────────────── MySQL 实现 ───────────────────────────
 
@@ -311,6 +216,6 @@ let instance: AccountRepo | null = null;
 
 /** 惰性构造：首次调用时才根据配置选择实现（避免模块加载期就连库） */
 export function accountRepo(): AccountRepo {
-  if (!instance) instance = config.storage === 'file' ? new FileAccountRepo() : new MysqlAccountRepo();
+  if (!instance) instance = new MysqlAccountRepo();
   return instance;
 }

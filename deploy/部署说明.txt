@@ -10,8 +10,7 @@ geo-browser 部署说明（本地 Chrome 版）
 二、首次部署（在一台新电脑上）
   1. 拉取项目代码（含 deploy 文件夹）
   2. 进入 deploy 目录，用文本编辑器打开 geo-browser-env
-     - 默认 file 模式（本地 json 台账，不连数据库），一般不用改
-     - 如需连数据库：GEO_STORAGE=mysql 并补齐 DB_* 四项
+     - 本项目仅支持 MySQL 存储，需补齐 DB_HOST/DB_USER/DB_NAME 三项（DB_PORT 默认 3306）
      - 端口默认 8787，可改
   3. 运行启动：bash run.sh
      - 首次会自动 npm install（需已安装 Node.js >= 18）
@@ -24,15 +23,14 @@ geo-browser 部署说明（本地 Chrome 版）
   日志：数据目录 logs/geo-browser.log（tail -f 可实时查看）
 
 四、配置项说明（geo-browser-env）
-  GEO_STORAGE          file=本地 json（默认）；mysql=连数据库（需配 DB_*）
-  GEO_DATA_ROOT        数据目录（账号 profile/代理台账/截图/信源分析产物），默认 ../geo-browser-data（项目外，避免误传仓库）
+  GEO_DATA_ROOT        数据目录（账号 profile/截图/信源分析产物），默认 ../geo-browser-data（项目外，避免误传仓库）
   GEO_ARTIFACT_MODE    debug=落盘截图/存档；none=不落盘
   PORT                 服务端口（默认 8787）
   GEO_USE_SYSTEM_CHROME 1=用系统 Chrome（本地版默认）；0=用 Playwright 自带
   GEO_MAX_BROWSERS     同时打开的浏览器上限
-  DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME  mysql 模式必填
+  DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME  MySQL 配置（必填）
 
 五、账号数据
-  file 模式：账号台账、代理台账、截图/信源产物都在 GEO_DATA_ROOT 指向的目录下
+  账号台账、代理台账存储在 MySQL；账号 profile/截图/信源产物在 GEO_DATA_ROOT 指向的目录下
   （默认 ../geo-browser-data，即项目外）；这些数据不进入 git 仓库。
   换电脑不迁移，直接在页面上重新添加账号即可。

@@ -1,11 +1,6 @@
-// 匿名身份/轮换计数的键值仓储（对应 geo_ui_identity_state 表）。
-//
-// file 实现：.profiles/_identity.json
-// mysql 实现：geo_ui_identity_state(state_key, payload JSON)
+// 匿名身份/轮换计数的键值仓储（对应 geo_ui_identity_state 表，MySQL 实现）。
 
-import fs from 'fs';
-import path from 'path';
-import { paths, config } from '../config/index.js';
+import { config } from '../config/index.js';
 import { dbPool } from '../db/pool.js';
 import type { RowDataPacket } from 'mysql2';
 
@@ -14,41 +9,11 @@ export interface IdentityRepo {
   set(key: string, value: Record<string, unknown>): Promise<void>;
 }
 
-// ─────────────────────────── 文件实现 ───────────────────────────
-
-const file = (): string => path.join(paths.profilesRoot, '_identity.json');
+// ─────────────────────────── MySQL 实现 ───────────────────────────
 
 interface PayloadRow extends RowDataPacket {
   payload: Record<string, unknown> | string;
 }
-
-export class FileIdentityRepo implements IdentityRepo {
-  async get(key: string): Promise<Record<string, unknown> | null> {
-    try {
-      const all = JSON.parse(fs.readFileSync(file(), 'utf-8')) as Record<
-        string,
-        Record<string, unknown>
-      >;
-      return all[key] ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  async set(key: string, value: Record<string, unknown>): Promise<void> {
-    let all: Record<string, Record<string, unknown>> = {};
-    try {
-      all = JSON.parse(fs.readFileSync(file(), 'utf-8'));
-    } catch {
-      /* 文件不存在则从空开始 */
-    }
-    all[key] = value;
-    fs.mkdirSync(paths.profilesRoot, { recursive: true });
-    fs.writeFileSync(file(), JSON.stringify(all, null, 2));
-  }
-}
-
-// ─────────────────────────── MySQL 实现 ───────────────────────────
 
 export class MysqlIdentityRepo implements IdentityRepo {
   async get(key: string): Promise<Record<string, unknown> | null> {
@@ -75,6 +40,6 @@ export class MysqlIdentityRepo implements IdentityRepo {
 let instance: IdentityRepo | null = null;
 
 export function identityRepo(): IdentityRepo {
-  if (!instance) instance = config.storage === 'file' ? new FileIdentityRepo() : new MysqlIdentityRepo();
+  if (!instance) instance = new MysqlIdentityRepo();
   return instance;
 }

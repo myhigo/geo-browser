@@ -27,7 +27,6 @@ set -a
 set +a
 
 PORT="${PORT:-8787}"
-GEO_STORAGE="${GEO_STORAGE:-file}"
 
 # 3) 已在运行则退出（幂等，防止重复执行）
 if curl -fsS "http://127.0.0.1:${PORT}/admin" >/dev/null 2>&1; then
@@ -35,15 +34,13 @@ if curl -fsS "http://127.0.0.1:${PORT}/admin" >/dev/null 2>&1; then
   exit 0
 fi
 
-# 4) mysql 模式校验必填项（file 模式跳过）
-if [ "${GEO_STORAGE}" = "mysql" ]; then
-  db_host="$(grep -E '^DB_HOST=' "${ENV_FILE}" | head -1 | cut -d= -f2- | tr -d '\r')"
-  db_user="$(grep -E '^DB_USER=' "${ENV_FILE}" | head -1 | cut -d= -f2- | tr -d '\r')"
-  db_name="$(grep -E '^DB_NAME=' "${ENV_FILE}" | head -1 | cut -d= -f2- | tr -d '\r')"
-  if [ -z "${db_host}" ] || [ -z "${db_user}" ] || [ -z "${db_name}" ]; then
-    echo "[错误] GEO_STORAGE=mysql 但缺少数据库配置：请在 ${ENV_FILE} 里补齐 DB_HOST、DB_USER、DB_NAME"
-    exit 1
-  fi
+# 4) 数据库配置校验（本项目仅支持 MySQL，DB_* 必填）
+db_host="$(grep -E '^DB_HOST=' "${ENV_FILE}" | head -1 | cut -d= -f2- | tr -d '\r')"
+db_user="$(grep -E '^DB_USER=' "${ENV_FILE}" | head -1 | cut -d= -f2- | tr -d '\r')"
+db_name="$(grep -E '^DB_NAME=' "${ENV_FILE}" | head -1 | cut -d= -f2- | tr -d '\r')"
+if [ -z "${db_host}" ] || [ -z "${db_user}" ] || [ -z "${db_name}" ]; then
+  echo "[错误] 缺少数据库配置：请在 ${ENV_FILE} 里补齐 DB_HOST、DB_USER、DB_NAME"
+  exit 1
 fi
 
 # 5) 依赖就绪（没有 node_modules 则安装）

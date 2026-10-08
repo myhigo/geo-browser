@@ -1,16 +1,9 @@
-// 代理 IP 池仓储层。
-//
-// 两种实现：
-//   FileProxyRepo  —— 本地 json（GEO_STORAGE=file，本机开发用）
-//   MysqlProxyRepo —— 数据库（默认，生产用）
-// 上层只依赖 ProxyRepo 接口，切换后端零改动。接口一律异步。
+// 代理 IP 池仓储层（MySQL 实现）。
 //
 // 用途：收录检测 / 采集 / 单次问答统一从 IP 池挑代理（LRU + 冷却 120s + 5 分钟占用租约），
 // 账号通过 proxy_id 关联到某个 IP，浏览器启动时把代理真实传给 Chromium。
 
-import fs from 'fs';
-import path from 'path';
-import { paths, config } from '../config/index.js';
+import { config } from '../config/index.js';
 import { dbPool } from '../db/pool.js';
 import type { RowDataPacket, ResultSetHeader } from 'mysql2';
 
@@ -66,88 +59,6 @@ export function splitProxyHost(raw: string): { host: string; protocol: 'http' | 
   }
   const port = s.includes(':') ? Number(s.split(':').pop()) : undefined;
   return { host: s.split(':')[0], protocol: 'http', port };
-}
-
-// ─────────────────────────── 文件实现 ───────────────────────────
-
-const proxiesFile = (): string => paths.proxiesFile;
-
-export class FileProxyRepo implements ProxyRepo {
-  private load(): ProxyIp[] {
-    try {
-      return JSON.parse(fs.readFileSync(proxiesFile(), 'utf-8')) as ProxyIp[];
-    } catch {
-      return [];
-    }
-  }
-
-  private save(list: ProxyIp[]): void {
-    fs.mkdirSync(path.dirname(proxiesFile()), { recursive: true });
-    fs.writeFileSync(proxiesFile(), JSON.stringify(list, null, 2));
-  }
-
-  async list(): Promise<ProxyIp[]> {
-    return this.load().filter((p) => p.nodeId === config.nodeId).reverse();
-  }
-
-  async get(id: number): Promise<ProxyIp | undefined> {
-    return (await this.list()).find((p) => p.id === id);
-  }
-
-  async add(p: Omit<ProxyIp, 'id'>): Promise<ProxyIp> {
-    const list = this.load();
-    const nextId = list.reduce((m, x) => Math.max(m, x.id), 0) + 1;
-    const row: ProxyIp = { ...p, id: nextId, nodeId: config.nodeId, enabled: p.enabled ?? false, usedCount: 0 };
-    list.push(row);
-    this.save(list);
-    return row;
-  }
-
-  async patch(id: number, patch: Partial<ProxyIp>): Promise<ProxyIp | undefined> {
-    const list = this.load();
-    const idx = list.findIndex((p) => p.id === id);
-    if (idx < 0) return undefined;
-    list[idx] = { ...list[idx], ...patch, id };
-    this.save(list);
-    return list[idx];
-  }
-
-  async remove(id: number): Promise<void> {
-    this.save(this.load().filter((p) => p.id !== id));
-  }
-
-  async countAccountsByProxy(id: number): Promise<number> {
-    // file 模式没有账号库关联查询：从各平台台账统计 proxyId
-    const root = paths.profilesRoot;
-    let n = 0;
-    try {
-      for (const f of fs.readdirSync(root)) {
-        if (!f.endsWith('.accounts.json')) continue;
-        const arr = JSON.parse(fs.readFileSync(path.join(root, f), 'utf-8')) as { proxyId?: number }[];
-        n += arr.filter((a) => a.proxyId === id).length;
-      }
-    } catch {
-      /* ignore */
-    }
-    return n;
-  }
-
-  async ensureDirectIp(): Promise<void> {
-    const list = this.load();
-    if (list.some((p) => p.nodeId === config.nodeId && isDirectIp(p))) return;
-    const nextId = list.reduce((m, x) => Math.max(m, x.id), 0) + 1;
-    list.push({
-      id: nextId,
-      nodeId: config.nodeId,
-      host: DIRECT_IP_HOST,
-      port: DIRECT_IP_PORT,
-      protocol: 'direct',
-      enabled: true,
-      usedCount: 0,
-      note: '不使用代理',
-    });
-    this.save(list);
-  }
 }
 
 // ─────────────────────────── MySQL 实现 ───────────────────────────
@@ -285,6 +196,6 @@ export class MysqlProxyRepo implements ProxyRepo {
 let instance: ProxyRepo | null = null;
 
 export function proxyRepo(): ProxyRepo {
-  if (!instance) instance = config.storage === 'file' ? new FileProxyRepo() : new MysqlProxyRepo();
+  if (!instance) instance = new MysqlProxyRepo();
   return instance;
 }

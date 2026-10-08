@@ -1091,12 +1091,10 @@ app.use('/api', (err: Error, _req: express.Request, res: express.Response, _next
 // 启动 API 服务
 export async function startServer(): Promise<void> {
   console.log(`[config] ${describeConfig()}`);
-  if (config.storage === 'mysql') {
-    // 连不上就在这里炸掉：绝不静默降级到文件存储（会导致"以为写库了其实写文件"）
-    await pingDb();
-    const recycled = await releaseStaleLeases(config.nodeId);
-    console.log(`[db] 连接正常 (${config.db.host}:${config.db.port}/${config.db.database})${recycled ? `，回收脏占用 ${recycled} 条` : ''}`);
-  }
+  // 连不上就在这里炸掉：本项目仅支持 MySQL，绝不静默降级到文件存储（会导致"以为写库了其实写文件"）
+  await pingDb();
+  const recycled = await releaseStaleLeases(config.nodeId);
+  console.log(`[db] 连接正常 (${config.db.host}:${config.db.port}/${config.db.database})${recycled ? `，回收脏占用 ${recycled} 条` : ''}`);
   // 确保宿主机直连行存在（seed，幂等）：host=127.0.0.1 port=0 protocol=direct，与代理 IP 一样参与调度
   await proxyRepo().ensureDirectIp();
   // 清理服务重启后的 waiting 残留：内存登录会话已随进程丢失，waiting 账号无法再「验证登录」，
