@@ -105,10 +105,12 @@ export class DoubaoAdapter implements PlatformAdapter {
       console.warn('⚠️ 输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
     }
 
-    // 回答已开始信号：流式胶囊可见，或回答容器已有文本。优于"输入框清空"判定。
+    // 回答已开始信号：发送控件进入生成态（aria-busy=true，发送钮变方块停止图标）、
+    // 流式胶囊可见，或回答容器已有文本。
     const answerStarted = (): Promise<boolean> =>
       this.page
         .evaluate(() => {
+          if (document.querySelector('[aria-busy="true"]')) return true;
           const cap = document.querySelector('[class*="capsule-loading"]');
           if (cap && (cap as HTMLElement).getBoundingClientRect().width > 0) return true;
           const ans = document.querySelector(
@@ -121,11 +123,12 @@ export class DoubaoAdapter implements PlatformAdapter {
     // 输入框是否仍含原问题
     const stillHasInput = (): Promise<boolean> => enteredText().then((t) => t.includes(probe));
 
-    // 轮询等待回答开始，最迟 waitMs
+    // 轮询等待回答开始，最迟 waitMs；输入框已清空也直接视为已提交
     const waitAnswerStart = async (waitMs: number): Promise<boolean> => {
       const t0 = Date.now();
       while (Date.now() - t0 < waitMs) {
         if (await answerStarted()) return true;
+        if (!(await stillHasInput())) return true;
         await this.page.waitForTimeout(1000);
       }
       return false;
@@ -201,6 +204,7 @@ export class DoubaoAdapter implements PlatformAdapter {
   //   检索/思考阶段：胶囊存在但 width=0（隐藏）→ **不能**当作完成（实测踩过坑：检索阶段就误判完成）
   //   流式输出阶段：胶囊可见（"智能体回答中，请等待"）
   //   完成：先观察到胶囊可见（进入流式），之后胶囊消失 + 容器文本连续 5 次采样无增长
+  // 发送控件生成态（aria-busy=true，发送钮变方块停止图标）同为流式指示。
   // 无胶囊平台（如豆包）：退回「容器文本连续 30 次采样无增长」兜底。
   // timeoutMs 仅作整体防失控硬上限。
   async waitForAnswer(timeoutMs = 180000, midDumpPath?: string): Promise<void> {
@@ -220,12 +224,13 @@ export class DoubaoAdapter implements PlatformAdapter {
         }, growthSel)
         .catch(() => null);
 
-    // 「流式输出中」= 加载胶囊可见（存在且宽度 > 0）
+    // 「流式输出中」= 加载胶囊可见，或发送控件处于生成态（aria-busy=true，方块停止图标）
     const isStreaming = (): Promise<boolean> =>
       this.page
         .evaluate(() => {
           const cap = document.querySelector('[class*="capsule-loading"]');
-          return !!cap && (cap as HTMLElement).getBoundingClientRect().width > 0;
+          if (cap && (cap as HTMLElement).getBoundingClientRect().width > 0) return true;
+          return !!document.querySelector('[aria-busy="true"]');
         })
         .catch(() => false);
 
@@ -348,8 +353,9 @@ export class DoubaoAdapter implements PlatformAdapter {
       }
       // ② 该平台无胶囊（从未见过流式信号）→ 连续 30 次无增长兜底
       if (streamingSeen === 0 && noGrowthStreak >= 30) {
+        const barsNow = await countActionBar();
         console.log(
-          `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 无流式信号，文本连续 30s 无增长（兜底），当前 ${lastLen ?? 0} 字`
+          `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 无流式信号，文本连续 30s 无增长（兜底），当前 ${lastLen ?? 0} 字（动作栏 ${barsNow}/基线 ${actionBaseline}）`
         );
         break;
       }
@@ -369,9 +375,9 @@ export class DoubaoAdapter implements PlatformAdapter {
 
       await this.page.waitForTimeout(1000);
 
-      // 生成态 DOM 采样（约 20s 处，一次）：落盘当时页面，供定标「生成中→已结束」
+      // 生成态 DOM 采样（约 8s 处，一次）：落盘当时页面，供定标「生成中→已结束」
       // 的真实标志（豆包动作图标为纯 SVG、无文字/aria 特征，静态样本拿不到生成态）。
-      if (midDumpPath && !midDumped && Date.now() - start > 20000) {
+      if (midDumpPath && !midDumped && Date.now() - start > 8000) {
         midDumped = true;
         try {
           fs.writeFileSync(midDumpPath, await this.page.content());
@@ -388,31 +394,29 @@ export class DoubaoAdapter implements PlatformAdapter {
     await this.page.waitForTimeout(500); // 收尾缓冲
   }
 
-  // 抽取回答正文；定位不到 → null。
-  // ⚠️ 用 page.evaluate 一次读 textContent，绝不用 locator.innerText()（live 页面上
-  // locator 有 actionability 等待，抽取流程会卡很久）。
+  // 抽取回答正文；定位不到返回 null。
+  // 豆包 class 为 CSS Module 哈希，无 answer/message 字面语义类，原选择器全失效。
+  // 用稳定语义 token 定位：用户提问气泡 = bg-g-send-msg-bubble-bg；AI 回答 = 含
+  // message-action-bar（复制/朗读/更多，仅回答有、全页唯一）。以动作栏为锚点上溯回答行
+  // （text-s-color-text-s），克隆后剔除动作栏再抽文本；单轮与多轮末轮均适用。
   async getAnswer(): Promise<string | null> {
-    const sel = this.selectors.answerContainer.join(', ');
-    const primary = await this.page
-      .evaluate((arg: { s: string; src: string }) => {
-        const toText = eval('(' + arg.src + ')') as (n: Node) => string;
-        const el = document.querySelector(arg.s) as HTMLElement | null;
-        return el ? toText(el) || null : null;
-      }, { s: sel, src: elementToText.toString() })
-      .catch(() => null);
-    if (primary) return primary;
-    // 兜底（豆包 DOM 未定标前的临时策略）：取最后一个 ≥50 字的 markdown 渲染块。
-    // 豆包回答走 markdown 渲染且位于问题之后 → 文档序最后一个即回答。
-    // ⚠️ 拿到真实回答 DOM 样本（finished.html）定标 answerContainer 后应删除这段。
     return this.page
       .evaluate((src: string) => {
         const toText = eval('(' + src + ')') as (n: Node) => string;
-        const blocks = Array.from(document.querySelectorAll('[class*="markdown"]')) as HTMLElement[];
-        for (let i = blocks.length - 1; i >= 0; i--) {
-          const t = toText(blocks[i]);
-          if (t.length >= 50) return t;
+        const bars = Array.from(
+          document.querySelectorAll('[class*="message-action-bar"]')
+        ) as HTMLElement[];
+        if (bars.length === 0) return null;
+        const bar = bars[bars.length - 1]; // 末轮回答的动作栏
+        let root: HTMLElement | null = bar;
+        while (root && !/inner-item|text-s-color-text-s/.test(root.className)) {
+          root = root.parentElement;
         }
-        return null;
+        if (!root) return null;
+        const clone = root.cloneNode(true) as HTMLElement;
+        const cloneBar = clone.querySelector('[class*="message-action-bar"]');
+        if (cloneBar) cloneBar.remove();
+        return toText(clone).trim() || null;
       }, elementToText.toString())
       .catch(() => null);
   }

@@ -110,7 +110,7 @@ async function runDiagnosticInner(
     executablePath?: string;
     args?: string[];
     ignoreDefaultArgs?: string[];
-    proxy?: { server: string; username?: string; password?: string };
+    proxy?: { server: string; username?: string; password?: string; bypass?: string };
   } = {
     headless,
     slowMo: headless ? 0 : 20, // headless 模式下不刻意放慢；非 headless 用于人工可视监控
