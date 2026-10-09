@@ -6,6 +6,7 @@ import { firstFound } from '../../diagnostics/elementProbe.js';
 import { elementToText } from '../textExtract.js';
 import { humanDelay } from '../../diagnostics/human.js';
 import { CandidateSelectors, PlatformAdapter, ScreenshotMode, SourceInfo } from '../../types.js';
+import { config } from '../../config/index.js';
 import {
   WENXIN_AD_AFTER,
   WENXIN_AD_DETECT_PAUSE,
@@ -593,58 +594,45 @@ export class WenxinAdapter implements PlatformAdapter {
     if (qaCount === 0) throw new Error('Q&A 块未定位到（qaBlock 候选均不匹配）');
 
     // —— 诊断三件套（平台私有，按用户要求在本方法内打印）——
-    const diag = await page
-      .evaluate((args: { sel: string; qsel: string }) => {
-        const { sel, qsel } = args;
-        const qa = document.querySelector(sel);
-        const bub = qsel ? document.querySelector(qsel) : null;
-        const r1 = qa ? qa.getBoundingClientRect() : null;
-        const r2 = bub ? bub.getBoundingClientRect() : null;
-        return {
-          qaTop: r1 ? Math.round(r1.top) : null,
-          qaH: r1 ? Math.round(r1.height) : null,
-          bubTop: r2 ? Math.round(r2.top) : null,
-          bubH: r2 ? Math.round(r2.height) : null,
-          bubInQa: r1 && r2 ? r2.top >= r1.top && r2.bottom <= r1.bottom : null,
-          bubPos: bub ? getComputedStyle(bub).position : null,
-        };
-      }, { sel: qaSel, qsel: qSel })
-      .catch(() => null);
-    log('📐 qa box / 问题气泡诊断:', JSON.stringify(diag));
+    // ⚠️ 仅 debug（GEO_ARTIFACT_MODE=debug）才执行 evaluate 并打印；生产（none）整体跳过，省掉 DOM 遍历
+    if (config.artifactMode === 'debug') {
+      const diag = await page
+        .evaluate((args: { sel: string; qsel: string }) => {
+          const { sel, qsel } = args;
+          const qa = document.querySelector(sel);
+          const bub = qsel ? document.querySelector(qsel) : null;
+          const r1 = qa ? qa.getBoundingClientRect() : null;
+          const r2 = bub ? bub.getBoundingClientRect() : null;
+          return {
+            qaTop: r1 ? Math.round(r1.top) : null,
+            qaH: r1 ? Math.round(r1.height) : null,
+            bubTop: r2 ? Math.round(r2.top) : null,
+            bubH: r2 ? Math.round(r2.height) : null,
+            bubInQa: r1 && r2 ? r2.top >= r1.top && r2.bottom <= r1.bottom : null,
+            bubPos: bub ? getComputedStyle(bub).position : null,
+          };
+        }, { sel: qaSel, qsel: qSel })
+        .catch(() => null);
+      log('📐 qa box / 问题气泡诊断:', JSON.stringify(diag));
+    }
 
-    const maskDiag = await page
-      .evaluate((sel) => {
-        const out: string[] = [];
-        let el = document.querySelector(sel) as HTMLElement | null;
-        while (el) {
-          const cs = getComputedStyle(el);
-          const m = cs.maskImage || cs.webkitMaskImage;
-          if (m && m !== 'none') out.push(((el.className || '').toString().slice(0, 40)) + ' -> ' + m.slice(0, 40));
-          el = el.parentElement;
-        }
-        return out;
-      }, qaSel)
-      .catch(() => []);
-    log('🎭 mask 诊断（qa 祖先链，应为空）:', JSON.stringify(maskDiag));
+    if (config.artifactMode === 'debug') {
+      const maskDiag = await page
+        .evaluate((sel) => {
+          const out: string[] = [];
+          let el = document.querySelector(sel) as HTMLElement | null;
+          while (el) {
+            const cs = getComputedStyle(el);
+            const m = cs.maskImage || cs.webkitMaskImage;
+            if (m && m !== 'none') out.push(((el.className || '').toString().slice(0, 40)) + ' -> ' + m.slice(0, 40));
+            el = el.parentElement;
+          }
+          return out;
+        }, qaSel)
+        .catch(() => []);
+      log('🎭 mask 诊断（qa 祖先链，应为空）:', JSON.stringify(maskDiag));
+    }
 
-    const bubSnap = await page
-      .evaluate((qsel) => {
-        const rows: Record<string, string>[] = [];
-        let el = qsel ? (document.querySelector(qsel) as HTMLElement | null) : null;
-        while (el) {
-          const cs = getComputedStyle(el);
-          rows.push({
-            el: el.tagName + '.' + ((el.className || '').toString().trim().slice(0, 30)),
-            pos: cs.position, disp: cs.display, vis: cs.visibility, op: cs.opacity,
-            clip: cs.clipPath.slice(0, 24), cv: cs.contentVisibility, contain: cs.contain,
-            tr: cs.transform.slice(0, 24), filter: cs.filter.slice(0, 20), z: cs.zIndex,
-          });
-          el = el.parentElement;
-        }
-        return rows;
-      }, qSel)
-      .catch(() => []);
-    log('🔬 气泡渲染快照（气泡→根）:', JSON.stringify(bubSnap));
 
     // ⑥ 元素级截图：边界 = qa 容器本身，Playwright 自己处理高于视口的滚动/拼接
     await qaLocator.screenshot({ path: outPath, animations: 'disabled', timeout: 60000 });

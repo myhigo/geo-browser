@@ -9,6 +9,7 @@ import { elementToText } from '../textExtract.js';
 import { humanClick } from '../../diagnostics/human.js';
 import { randWaitMs } from '../../tuning/delays.js';
 import { CandidateSelectors, PlatformAdapter, SourceInfo, ScreenshotMode } from '../../types.js';
+import { config } from '../../config/index.js';
 
 // 元宝引用数据提取（运行在 Node 侧，非浏览器上下文）：聊天 API 响应为 SSE，
 // 其中 docs 数组含每条信源的 {index,docId,title,url,quote,...}。用 docId 定位对象、
@@ -290,6 +291,30 @@ export class YuanbaoAdapter implements PlatformAdapter {
   //   ⚠️ 区分：用户的「复制/编辑问题」操作栏（ToolbarCopy_/agent-chat__conv--human__toolbar）
   //      在发问前就存在，不能用作信号；元宝专属的 Repeat_/ToolbarSuitable_ 是回答完成后才出现。
   //   evaluate 内一律匿名。
+
+  /**
+   * 元宝「问题确认 / 澄清（Clarify）」卡：回答输出前会弹澄清卡，卡上【跳过所有】带 60s 倒计时，
+   * 不点就要等倒计时走完（onCountdownEnd）才会继续输出回答。
+   * 采集场景只要答案、不需要澄清 → 命中即点掉，让回答立即继续。
+   *
+   * ⚠️ 按钮 class 是 CSS Modules 哈希值（形如 ClarifySkipButton_skip__xxx，每次前端构建都会变），
+   *    不能按 class 定位；改用稳定文本定位，兼容「跳过所有」与倒计时态「跳过所有 (Ns)」。
+   * @returns 是否成功点掉（false = 没这张卡或点击失败）
+   */
+  private async trySkipClarify(): Promise<boolean> {
+    const sel = 'button:has-text("跳过所有")';
+    const btn = this.page.locator(sel).first();
+    // ⚠️ 本方法是「非阻塞探测」，绝不等待澄清卡出现——绝大多数场景没有这张卡，必须瞬时返回。
+    //    count() / isVisible() 都立即返回（不等待元素出现），只有确实看到可见按钮才走 humanClick；
+    //    因为 humanClick 内部是 boundingBox({ timeout: 5000 })，按钮不存在/不可见时会等满 5s，
+    //    在每秒轮询下会把整个等待循环拖垮。两道过滤缺一不可。
+    if ((await btn.count().catch(() => 0)) === 0) return false;
+    if (!(await btn.isVisible().catch(() => false))) return false;
+    const clicked = await humanClick(this.page, sel).catch(() => false);
+    if (clicked) log('⏭️ [元宝] 检测到「问题确认/澄清」卡，已点【跳过所有】，继续等待回答输出');
+    return clicked;
+  }
+
   async waitForAnswer(timeoutMs = 180000): Promise<void> {
     const start = Date.now();
 
@@ -320,6 +345,14 @@ export class YuanbaoAdapter implements PlatformAdapter {
       let lastProgressLog = Date.now();
 
       while (Date.now() - start < timeoutMs) {
+        // 元宝澄清卡会中断回答并挂 60s 倒计时：每轮先探测并点【跳过所有】。
+        // 点掉后重置稳定计数 → 给真正的回答重新计时，避免把澄清卡误判成「回答已完成」。
+        if (await this.trySkipClarify()) {
+          lastLen = null;
+          everGrew = false;
+          noGrowth = 0;
+        }
+
         const len = await getAnswerLen();
         if (len !== null) {
           if (lastLen === null) lastLen = len;
@@ -947,7 +980,6 @@ export class YuanbaoAdapter implements PlatformAdapter {
     } catch {
       /* 诊断落盘失败不影响截图 */
     }
-    log('📐 截图主策略诊断:', JSON.stringify(main));
 
     let clip: { x: number; y: number; width: number; height: number } | null =
       (main as any).ok && (main as any).clip ? (main as any).clip : null;
@@ -969,7 +1001,8 @@ export class YuanbaoAdapter implements PlatformAdapter {
         })
         .catch(() => null);
       if (region) {
-        log('📐 截图兜底区域（问题→列表底部）:', JSON.stringify(region));
+        // 仅 debug 打印：region 本身是兜底裁剪依据（clip = region），evaluate 不能跳过
+        if (config.artifactMode === 'debug') log('📐 截图兜底区域（问题→列表底部）:', JSON.stringify(region));
         clip = region;
       }
     }

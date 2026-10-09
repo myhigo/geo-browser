@@ -104,6 +104,9 @@ async function runDiagnosticScoped(
 ): Promise<DiagnosticResult> {
   const url = opts.url || def.defaultUrl;
 
+  // 诊断产物开关：debug 才落盘截图/HAR/HTML 现场与诊断报告；生产（none）只产出交付物（05 产品图）与结构化结果。
+  const dbg = config.artifactMode === 'debug';
+
   const headless = opts.headless ?? process.env.GEO_HEADLESS === '1';
   // 动态出口（按账号 ipMode=dynamic）：开浏览器前取快代理新 IP；取不到回退传入的静态代理/直连。
   // 不再读全局 config.dps.secretId——是否走动态由账号 ipMode 决定，支持同机混搭。
@@ -163,7 +166,7 @@ async function runDiagnosticScoped(
   const contextOpts: Parameters<Browser['newContext']>[0] = {
     viewport: { width: 1280, height: 800 },
     acceptDownloads: false, // 不触发任何下载行为，避免系统下载条/对话框
-    recordHar: { path: path.join(dirN, 'network.har') },
+    ...(dbg ? { recordHar: { path: path.join(dirN, 'network.har') } } : {}),
     userAgent:
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
   };
@@ -324,10 +327,12 @@ async function runDiagnosticScoped(
       }
 
       await page.waitForTimeout(1500);
-      await page.screenshot({ path: path.join(dirS, '01-before.png') });
-      capturedShots.push('01-before.png');
-      beforeHtml = await page.content();
-      fs.writeFileSync(path.join(dirP, 'before.html'), beforeHtml);
+      if (dbg) {
+        await page.screenshot({ path: path.join(dirS, '01-before.png') });
+        capturedShots.push('01-before.png');
+        beforeHtml = await page.content();
+        fs.writeFileSync(path.join(dirP, 'before.html'), beforeHtml);
+      }
     } catch (e) {
       notes.push(`❌ 打开页面失败：${(e as Error).message}`);
     }
@@ -364,9 +369,11 @@ async function runDiagnosticScoped(
             .waitForSelector('textarea, input, [contenteditable="true"]', { timeout: 20000 })
             .catch(() => {});
           await page.waitForTimeout(2500);
-          await page.screenshot({ path: path.join(dirS, '01-before.png') });
-          beforeHtml = await page.content();
-          fs.writeFileSync(path.join(dirP, 'before.html'), beforeHtml);
+          if (dbg) {
+            await page.screenshot({ path: path.join(dirS, '01-before.png') });
+            beforeHtml = await page.content();
+            fs.writeFileSync(path.join(dirP, 'before.html'), beforeHtml);
+          }
         } else {
           notes.push(
             `⚠️ 等待人工登录超时（${Math.round(opts.waitLoginMs / 1000)}s），本次按未登录继续。`
@@ -429,8 +436,10 @@ async function runDiagnosticScoped(
         notes.push(`滑动验证处理异常（不影响后续）：${(e as Error).message}`);
       }
 
-      await page.screenshot({ path: path.join(dirS, '02-question.png') });
-      capturedShots.push('02-question.png');
+      if (dbg) {
+        await page.screenshot({ path: path.join(dirS, '02-question.png') });
+        capturedShots.push('02-question.png');
+      }
       // 03 截图前等「回答开始渲染」：元素驱动（回答容器/加载胶囊出现），替代固定 1.5s——
       // 不同问题思考时间不同，固定时间会不适配。最多轮询 15 次（整体保护）后仍没开始就截现状。
       for (let i = 0; i < 15; i++) {
@@ -445,13 +454,17 @@ async function runDiagnosticScoped(
         if (started) break;
         await page.waitForTimeout(1000);
       }
-      await page.screenshot({ path: path.join(dirS, '03-answering.png') });
-      capturedShots.push('03-answering.png');
+      if (dbg) {
+        await page.screenshot({ path: path.join(dirS, '03-answering.png') });
+        capturedShots.push('03-answering.png');
+      }
 
       // 豆包等无文字级"生成结束"标志的平台：生成中途落盘一份 DOM，用于定标结束标志
-      await adapter.waitForAnswer(180000, path.join(root, 'page', 'answering.html'), question);
-      await page.screenshot({ path: path.join(dirS, '04-finished.png') });
-      capturedShots.push('04-finished.png');
+      await adapter.waitForAnswer(180000, dbg ? path.join(root, 'page', 'answering.html') : undefined, question);
+      if (dbg) {
+        await page.screenshot({ path: path.join(dirS, '04-finished.png') });
+        capturedShots.push('04-finished.png');
+      }
     } catch (e) {
       notes.push(`⚠️ 交互流程中断（多为元素未定位）：${(e as Error).message}`);
     }
@@ -515,8 +528,10 @@ async function runDiagnosticScoped(
       notes.push('未成功发送问题，跳过回答/信源抽取。请检查 sendButton 候选 selector。');
     }
 
-    finishedHtml = (await page.content().catch(() => beforeHtml)) || beforeHtml;
-    fs.writeFileSync(path.join(dirP, 'finished.html'), finishedHtml); // 现场留档（诊断用，非截图来源）
+    if (dbg) {
+      finishedHtml = (await page.content().catch(() => beforeHtml)) || beforeHtml;
+      fs.writeFileSync(path.join(dirP, 'finished.html'), finishedHtml); // 现场留档（诊断用，非截图来源）
+    }
 
     try {
       elementDiagnosis = await probeElements(page, def.selectors);
@@ -540,15 +555,15 @@ async function runDiagnosticScoped(
       artifacts: {
         screenshots: capturedShots.map((f) => `screenshot/${f}`),
         qaScreenshot: qaOk ? 'screenshot/05-qa-block.png' : undefined,
-        beforeHtml: 'page/before.html',
-        finishedHtml: 'page/finished.html',
-        har: 'network/network.har',
-        reportHtml: 'report.html',
+        beforeHtml: dbg ? 'page/before.html' : undefined,
+        finishedHtml: dbg ? 'page/finished.html' : undefined,
+        har: dbg ? 'network/network.har' : undefined,
+        reportHtml: dbg ? 'report.html' : undefined,
       },
       notes,
     };
     fs.writeFileSync(path.join(root, 'result.json'), JSON.stringify(result, null, 2));
-    await writeReport(root, result, def.label);
+    if (dbg) await writeReport(root, result, def.label);
     log(`✅ 诊断完成（部分失败也会留现场），样本库：${path.relative(process.cwd(), root)}`);
   } catch (e) {
     notes.push(`❌ 诊断异常：${(e as Error).message}`);

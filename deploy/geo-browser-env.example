@@ -3,8 +3,9 @@
 # 本文件是公开模板，不要填真实密码。
 # 改动在下次启动时生效（启动脚本自动读取 geo-browser-env）。
 
-# 产物落盘：debug=截图/页面存档落盘（目录见 GEO_DATA_ROOT）；none=不落盘
-GEO_ARTIFACT_MODE=debug
+# 诊断产物：none=生产态，只产出交付物（Q&A 产品图）与结构化结果，不落盘诊断现场；
+#           debug=额外落盘 01~04 诊断连拍 / before·answering·finished.html / network.har / report.html，仅排障时用
+GEO_ARTIFACT_MODE=none
 
 # 数据目录（账号 profile / 代理台账 / 截图 / 信源分析产物都放这里），与项目平级、不进仓库
 GEO_DATA_ROOT=../geo-browser-data
