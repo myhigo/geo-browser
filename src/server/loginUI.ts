@@ -1,7 +1,7 @@
 // 平台登录管理页（多账号版，极简无外部依赖）。入口 GET /admin。
-// 2026-09-25 按 geo-ui-browser 排版对齐重排：左侧菜单四大项（代理管理/账号管理/信源分析/收录检测），
+// 2026-09-25 按 geo-ui-browser 排版对齐重排：左侧菜单四大项（静态IP管理/账号管理/信源分析/收录检测），
 // 账号管理页顶部平台 tab 切换；账号卡片：状态+今日查询+最近使用一行 + 备注 + 代理 + 启停/取消登录/测试/删除；
-// 代理管理页：flex 网格一行 2-3 卡 + 行内编辑 + 最近使用行。
+// 静态IP管理页：flex 网格一行 2-3 卡 + 行内编辑 + 最近使用行。
 // 本地 Chrome 版：登录/测试窗口由后端直接开本机浏览器，页面不弹 noVNC 标签页。
 export function adminPageHtml(): string {
   return `<!doctype html>
@@ -85,7 +85,7 @@ var CUR = null, POLL = null, SA_LAST = '', TESTPOLL = null, PROXIES = [];
 var ACC_PLATFORM = null;
 // 已构建面板的结构标识："<平台>"。用于避免轮询时整块重建
 var PANEL_KEY = null;
-// 代理管理：正在编辑的代理 id（null=无编辑态）
+// 静态IP管理：正在编辑的代理 id（null=无编辑态）
 var PX_EDITING = null;
 var ST = { none:{t:'未登录',c:'#c9cdd4'}, waiting:{t:'登录中',c:'#ff7d00'}, active:{t:'已登录',c:'#00b42a'}, cooling:{t:'冷却中',c:'#ff7d00'}, failed:{t:'不可用',c:'#f53f3f'} };
 function $(s){ return document.querySelector(s); }
@@ -93,10 +93,10 @@ function toast(m){ var t=$('#toast'); t.textContent=m; t.classList.add('show'); 
 function esc(x){ return String(x==null?'':x).replace(/[&<>"]/g, function(ch){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]; }); }
 // 紧凑时间：MM-DD HH:mm。卡片窄，完整 toLocaleString（含秒）太长会撑破布局
 function fmtTime(ts){ var d=new Date(ts); var p=function(n){ return n<10?'0'+n:''+n; }; return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes()); }
-// 2026-09-24 菜单四项定稿：代理管理 / 账号管理 / 信源分析 / 收录检测（平台移到账号管理页顶部 tab）
+// 2026-09-24 菜单四项定稿：静态IP管理 / 账号管理 / 信源分析 / 收录检测（平台移到账号管理页顶部 tab）
 function menu(platforms){
   var items = [
-    {id:'__proxies', label:'代理管理'},
+    {id:'__proxies', label:'静态IP管理'},
     {id:'__accounts', label:'账号管理'},
     {id:'__sources', label:'信源分析'},
     {id:'__pull', label:'收录检测'},
@@ -128,20 +128,19 @@ function renderAccounts(){
     var p = plats.filter(function(x){ return x.platformId===ACC_PLATFORM; })[0];
     if(!p) return;
     menu(plats);
-    // 账号 → 代理绑定下拉（2026-09-22 新增；换绑后账号需重新登录，由后端处理）
+    // 静态代理下拉（仅 ip模式=static 时渲染，排除宿主机直连行 127.0.0.1:0）
     var proxySelHtml = function(a){
       var cur = a.proxyId||0;
-      var opts = '<option value="0">不绑代理（直连）</option>'
-        + PROXIES.filter(function(x){ return x.enabled!==false || cur===x.id; }).map(function(x){
-          // 与代理管理页保持一致：以 port===0 判直连，标签显示 IP 而非"宿主机"
-          var isDirect = x.port===0;
-          var label = isDirect ? esc(x.host)+'（直连）' : esc(x.host)+':'+x.port;
-          if(x.note) label += ' '+esc(x.note);
-          return '<option value="'+x.id+'"'+(cur===x.id?' selected':'')+'>'+label+'</option>';
-        }).join('');
-      return '<select class="proxy-sel" data-acc="'+esc(a.id)+'"'+(a.ipMode==='dynamic'?' disabled':'')+'>'+opts+'</select>';
+      var opts = PROXIES.filter(function(x){ return (x.port!==0 || cur===x.id) && (x.enabled!==false || cur===x.id); }).map(function(x){
+        var label = (x.port===0 ? esc(x.host)+'（直连）' : esc(x.host)+':'+x.port);
+        if(x.note) label += ' '+esc(x.note);
+        return '<option value="'+x.id+'"'+(cur===x.id?' selected':'')+'>'+label+'</option>';
+      }).join('');
+      // 未绑定代理时不预选任何真实代理，强制用户显式选择
+      if (!cur || cur===0) opts = '<option value="" selected>请选择静态代理</option>' + opts;
+      return '<select class="proxy-sel" data-acc="'+esc(a.id)+'">'+opts+'</select>';
     };
-    // 出口模式下拉：local=本地IP直连；static=绑定静态代理；dynamic=快代理动态IP（选 dynamic 时禁用上面的代理下拉）
+    // ip模式下拉
     var ipModeSelHtml = function(a){
       var mode = a.ipMode || 'local';
       var opts = [
@@ -173,10 +172,10 @@ function renderAccounts(){
         // 第三行：今日查询、最近使用
         + '<div class="acc-stats"><span class="k">今日查询</span><b>'+(a.todayQueries==null?0:a.todayQueries)+'</b>'
         + '<span class="k">最近使用</span><b>'+(a.lastUsedAt?fmtTime(a.lastUsedAt):'-')+'</b></div>'
-        // 第四行：代理
-        + '<div class="acc-row"><span class="k">代理</span>'+proxySelHtml(a)+'</div>'
-        // 第五行：出口模式
-        + '<div class="acc-row"><span class="k">出口</span>'+ipModeSelHtml(a)+'</div>'
+        // ip模式
+        + '<div class="acc-row"><span class="k">ip模式</span>'+ipModeSelHtml(a)+'</div>'
+        // 代理
+        + (a.ipMode==='static'?'<div class="acc-row"><span class="k">代理</span>'+proxySelHtml(a)+'</div>':'')
         // 第五行：连续失败（有才显示）
         + (a.consecutiveFails?'<div class="acc-fail"><span class="k">连续失败</span><b>'+a.consecutiveFails+'</b></div>':'');
       if(a.note) accHtml += '<div class="note">'+esc(a.note)+'</div>';
@@ -248,14 +247,14 @@ function syncTestButtons(){
     });
   }).catch(function(){});
 }
-// ---- 代理管理页（2026-09-24 与 geo-ui-browser 对齐）：flex 网格一行 2-3 卡 + 行内编辑 + 最近使用行 ----
+// ---- 静态IP管理页（2026-09-24 与 geo-ui-browser 对齐）：flex 网格一行 2-3 卡 + 行内编辑 + 最近使用行 ----
 function renderProxies(){
   if(POLL) clearInterval(POLL); POLL=null;
   $('#panel').innerHTML =
-      '<h2>代理管理</h2>'
+      '<h2>静态IP管理</h2>'
     + '<div class="acc"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">'
     + '<input id="px-host" class="inp" style="width:180px;" placeholder="IP 或域名">'
-    + '<input id="px-port" class="inp" style="width:110px;" placeholder="端口（0=直连）">'
+    + '<input id="px-port" class="inp" style="width:110px;" placeholder="端口">'
     + '<input id="px-user" class="inp" style="width:130px;" placeholder="账号（可选）">'
     + '<input id="px-pass" class="inp" style="width:130px;" type="password" placeholder="密码（可选）">'
     + '<input id="px-note" class="inp" style="width:150px;" placeholder="备注（可选）">'
@@ -265,10 +264,10 @@ function renderProxies(){
     var host = $('#px-host').value.trim();
     var portRaw = $('#px-port').value.trim();
     if(!host){ toast('请填 IP 或域名'); return; }
-    if(portRaw === ''){ toast('请填端口（0 = 直连不代理）'); return; }
+    if(portRaw === ''){ toast('请填端口'); return; }
     var port = Number(portRaw);
-    if(!Number.isInteger(port) || port < 0 || port > 65535){ toast('端口需为 0-65535 的整数（0 = 直连不代理）'); return; }
-    var payload = { host: host, port: port, protocol: (port===0) ? 'direct' : 'http' };
+    if(!Number.isInteger(port) || port < 1 || port > 65535){ toast('端口需为 1-65535 的整数'); return; }
+    var payload = { host: host, port: port, protocol: 'http' };
     var u = $('#px-user').value.trim(); if(u) payload.username = u;
     var p = $('#px-pass').value; if(p) payload.password = p;
     var n = $('#px-note').value.trim(); if(n) payload.note = n;
@@ -283,14 +282,12 @@ function renderProxies(){
 function pxTick(){
   fetch('/api/proxies').then(function(r){ return r.json(); }).then(function(d){
     var box = $('#px-list'); if(!box) return;
-    var list = d.proxies||[];
-    if(!list.length){ box.innerHTML = '<div class="empty">还没有代理 IP（宿主机直连行会随服务启动自动出现）。</div>'; return; }
+    // 静态IP管理页只列真实静态代理（port>0）；历史直连行不在本页管理
+    var list = (d.proxies||[]).filter(function(p){ return p.port !== 0; });
+    if(!list.length){ box.innerHTML = '<div class="empty">还没有静态 IP。</div>'; return; }
     // flex 网格：一行 2-3 个卡片；min-width 保证窄屏自动换行
     box.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:10px;">' + list.map(function(p){
-      // port=0 即直连（不设代理）。标题一律显示 IP，直连与否由后面的协议徽标（直连/http/socks5）区分
-      var isDirect = p.port===0;
-      var title = isDirect ? esc(p.host) : esc(p.host)+':'+p.port;
-      var badge = isDirect ? '直连' : '';
+      var title = esc(p.host)+':'+p.port;
       if(p.id===PX_EDITING){
         // 编辑态：5 个字段 + 保存/取消（密码用 password 类型，esc 防 HTML 注入）
         return '<div class="acc" style="width:calc(33.33% - 8px);min-width:280px;box-sizing:border-box;">'
@@ -306,7 +303,6 @@ function pxTick(){
       }
       return '<div class="acc" style="width:calc(33.33% - 8px);min-width:280px;box-sizing:border-box;"><div class="acc-top">'
         + '<span class="st-label" style="font-family:ui-monospace,monospace;">'+title+'</span>'
-        + (badge ? '<span class="meta">'+badge+'</span>' : '')
         + (p.enabled===false?'<span class="meta" style="color:#f53f3f;">已停用</span>':'<span class="meta" style="color:#00b42a;">启用中</span>')
         + '</div>'
         + '<div class="meta">绑定账号：<b>'+p.accounts+'</b></div>'
@@ -314,9 +310,9 @@ function pxTick(){
         + (p.username?'<div class="meta">账号：<b>'+esc(p.username)+'</b></div>':'')
         + (p.note?'<div class="meta">备注：<b>'+esc(p.note)+'</b></div>':'')
         + '<div class="btns">'
-        + (isDirect ? '' : '<button data-px="'+p.id+'" data-pxact="edit">编辑</button>')
-        + (isDirect ? '' : '<button data-px="'+p.id+'" data-pxact="toggle" data-en="'+(p.enabled?'1':'0')+'">'+(p.enabled?'停用':'启用')+'</button>')
-        + (isDirect ? '' : '<button class="danger" data-px="'+p.id+'" data-pxact="del">删除</button>')
+        + '<button data-px="'+p.id+'" data-pxact="edit">编辑</button>'
+        + '<button data-px="'+p.id+'" data-pxact="toggle" data-en="'+(p.enabled?'1':'0')+'">'+(p.enabled?'停用':'启用')+'</button>'
+        + '<button class="danger" data-px="'+p.id+'" data-pxact="del">删除</button>'
         + '</div></div>';
     }).join('') + '</div>';
   }).catch(function(){ var b=$('#px-list'); if(b) b.innerHTML='<span class="empty">代理列表加载失败</span>'; });
@@ -550,7 +546,7 @@ document.addEventListener('click', function(ev){
   // 账号管理页顶部平台 tab（2026-09-24）
   var pt = ev.target && ev.target.closest ? ev.target.closest('button.plat-tab') : null;
   if(pt){ ACC_PLATFORM = pt.getAttribute('data-plat'); render(); return; }
-  // 代理管理行按钮（启停/删除/编辑）
+  // 静态IP管理行按钮（启停/删除/编辑）
   var px = ev.target && ev.target.closest ? ev.target.closest('button[data-px]') : null;
   if(px){
     var pid = Number(px.getAttribute('data-px'));

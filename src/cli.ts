@@ -92,7 +92,8 @@ async function main(): Promise<void> {
       allocated.platformId,
       allocated.accountId,
       !!result.answerText && !result.loginRequired,
-      result.loginRequired
+      result.loginRequired,
+      result.usedDps
     );
   }
   process.exit(0);

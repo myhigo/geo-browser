@@ -3,9 +3,10 @@
 // 核心规则：
 //   - 任务 = 词 × 平台，最小执行单元
 //   - 调度单元 = 账号（IP 是账号的绑定属性）
-//   - 冷却键 = (平台, IP)，该组合使用后进入 GEO_PLATFORM_IP_INTERVAL 秒冷却
-//   - 槽位 = 同时运行的浏览器数 = 启用平台数（GEO_MAX_SLOTS=0 时自动）
-//   - 同 IP 不同平台可并发，同平台不同 IP 可并发，同平台同 IP 必须间隔
+//   - 冷却键 = (平台, 实际出口IP)：local→127.0.0.1，static→代理 host，dynamic 不参与；同出口同平台须间隔 GEO_PLATFORM_IP_INTERVAL 秒
+//   - 槽位 = 同时运行的浏览器数上限 = 启用平台数（GEO_MAX_SLOTS=0 时自动）
+//   - 每平台同时只运行一个浏览器（无论账号模式），同平台严格串行
+//   - 同 IP 不同平台可并发；同平台同 IP 必须间隔（按出口冷却 120s）
 //   - 任务在池里等冷却，无到期时间；冷却到期自动被扫描捞起
 //   - 预检：目标平台无可用账号 → error + 停止本轮
 //
@@ -34,20 +35,33 @@ export type SchedulerLog = (line: string) => void;
 
 let taskPool: SchedulerTask[] = [];
 let slotCount = 0;
+/** 每平台同时运行的浏览器上限（=1：同平台严格串行，无论账号模式） */
+const MAX_PER_PLATFORM = 1;
+/** 各平台正在运行的采集任务数（per-platform 并发护栏） */
+const runningByPlatform = new Map<string, number>();
+/** 每平台"无可用账号"告警节流：避免每个 pending 任务每轮都刷日志（最多每 60s 一次） */
+const lastNoAccountWarn = new Map<string, number>();
 let timer: ReturnType<typeof setInterval> | null = null;
 let scanning = false;
 let executor: TaskExecutor | null = null;
 let logger: SchedulerLog = console.log;
 
+/** 平台任务完成：归还 per-platform 计数 */
+function decPlatformRunning(p: string): void {
+  const n = (runningByPlatform.get(p) ?? 0) - 1;
+  if (n <= 0) runningByPlatform.delete(p);
+  else runningByPlatform.set(p, n);
+}
+
 // ─────────────────────────── 挑账号 ───────────────────────────
 
 /** 现场申请一个可用账号：调 allocateAccount（含 active+enabled+未占用+有profile+(平台,IP)未冷却 检查） */
-async function tryAcquire(platform: string): Promise<Account | null> {
+async function tryAcquire(platform: string): Promise<{ acc: Account | null; reason?: string }> {
   const ready = await allocateAccount(platform);
-  if (!ready.ok || !ready.accountId) return null;
+  if (!ready.ok || !ready.accountId) return { acc: null, reason: ready.reason };
   // allocateAccount 只返回 accountId/dir，拿完整账号信息（含 proxyId）用于日志
   const acc = await accountRepo().get(platform, ready.accountId);
-  return acc ?? null;
+  return { acc: acc ?? null };
 }
 
 // ─────────────────────────── 扫描循环 ───────────────────────────
@@ -56,11 +70,22 @@ async function scanOnce(maxSlots: number): Promise<void> {
   for (const task of taskPool) {
     if (task.state !== 'pending') continue;
     if (slotCount >= maxSlots) break;
-    const acc = await tryAcquire(task.platform);
-    if (!acc) continue;
+    // 每平台并发护栏：同平台已有任务在跑则跳过（一个平台同时只开一个浏览器）
+    if ((runningByPlatform.get(task.platform) ?? 0) >= MAX_PER_PLATFORM) continue;
+    const { acc, reason } = await tryAcquire(task.platform);
+    if (!acc) {
+      const now = Date.now();
+      const last = lastNoAccountWarn.get(task.platform) ?? 0;
+      if (now - last > 60_000) {
+        logger(`[scheduler] 「${task.platform}」暂无可派发账号：${reason ?? '未知原因'}（任务保持等待，下个周期重试）`);
+        lastNoAccountWarn.set(task.platform, now);
+      }
+      continue;
+    }
     task.state = 'running';
     task.accountId = acc.id;
     slotCount++;
+    runningByPlatform.set(task.platform, (runningByPlatform.get(task.platform) ?? 0) + 1);
     const ipLabel = acc.ipMode === 'dynamic' ? '动态IP' : acc.ipMode === 'static' ? (acc.proxyId ? `proxy#${acc.proxyId}` : '静态(未绑代理)') : '本地IP';
     logger(`[scheduler] 词${task.wordId}「${task.keyword}」×${task.platform} 开始（账号 ${acc.id}，${ipLabel}）`);
     const exec = executor;
@@ -76,12 +101,14 @@ async function scanOnce(maxSlots: number): Promise<void> {
       .then(() => {
         task.state = 'done';
         slotCount--;
+        decPlatformRunning(task.platform);
         logger(`[scheduler] 词${task.wordId}×${task.platform} 完成`);
       })
       .catch((e: unknown) => {
         task.state = 'failed';
         task.failReason = e instanceof Error ? e.message : String(e);
         slotCount--;
+        decPlatformRunning(task.platform);
         logger(`[scheduler] 词${task.wordId}×${task.platform} 失败：${task.failReason}`);
       });
   }
@@ -154,5 +181,7 @@ export function resetScheduler(): void {
   stopScheduler();
   taskPool = [];
   slotCount = 0;
+  runningByPlatform.clear();
+  lastNoAccountWarn.clear();
   scanning = false;
 }

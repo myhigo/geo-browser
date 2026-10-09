@@ -77,6 +77,7 @@ export interface DiagnosticResult {
   question: string;
   timestamp: string;
   loginRequired: boolean; // 是否检测到需要登录（匿名路径不可行）
+  usedDps: boolean; // 本次是否实际用成动态代理（false=回退到静态代理/直连）
   answerText: string | null; // null = 定位不到回答区
   sources: SourceInfo[] | null; // null = 定位不到信源区
   sourceCount: number | null; // 0 / 正整数 / null(定位不到)

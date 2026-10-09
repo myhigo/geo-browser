@@ -33,16 +33,10 @@ export interface ProxyRepo {
   remove(id: number): Promise<void>;
   /** 绑定到该 IP 的账号数（删除前校验用） */
   countAccountsByProxy(id: number): Promise<number>;
-  /** 确保宿主机直连行存在（seed，幂等）：host=127.0.0.1 port=0 protocol=direct */
-  ensureDirectIp(): Promise<void>;
 }
 
-// 直连行：和普通代理 IP 一样参与调度（LRU/冷却/租约），唯一区别是 port=0 ——
-// 浏览器启动时识别到它就不传代理（走宿主机/本机出口）。
-// ❗判定只看 port===0，不看 host、也不看 protocol：端口 0 不是合法监听端口，
-//   任何「IP:0」都表示「这条不设代理」，避免把直连行误拼成 http://x.x.x.x:0 这种无效代理。
-//   （seed 出来的宿主机行仍是 host=127.0.0.1 port=0，只是为了展示时显示成"宿主机（直连）"。）
-export const DIRECT_IP_HOST = '127.0.0.1';
+// 直连判定：port===0 视为不设代理（端口 0 不是合法监听端口）。
+// 历史数据可能存在 port=0 的直连行，统一按 host IP 处理。
 export const DIRECT_IP_PORT = 0;
 export function isDirectIp(p: Pick<ProxyIp, 'port'>): boolean {
   return p.port === DIRECT_IP_PORT;
@@ -179,15 +173,6 @@ export class MysqlProxyRepo implements ProxyRepo {
       [config.nodeId, id]
     );
     return Number(rows[0]?.n ?? 0);
-  }
-
-  async ensureDirectIp(): Promise<void> {
-    // INSERT IGNORE：uk_node_host_port 唯一键天然幂等（已存在（含已停用）不覆盖）
-    await dbPool().query(
-      `INSERT IGNORE INTO geo_ui_proxy_ip (node_id, host, port, protocol, username, password, enabled, note, used_count)
-       VALUES (?, ?, ?, 'direct', NULL, NULL, 1, '不使用代理', 0)`,
-      [config.nodeId, DIRECT_IP_HOST, DIRECT_IP_PORT]
-    );
   }
 }
 

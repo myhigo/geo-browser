@@ -531,6 +531,7 @@ async function runDiagnosticScoped(
       question,
       timestamp: stamp,
       loginRequired,
+      usedDps,
       answerText,
       sources,
       sourceCount: sources === null ? null : sources.length,

@@ -206,7 +206,7 @@ export async function execute(
   });
   if (rotation) await releaseIdentity(platform, result.loginRequired);
   if (ledgerAccountId) {
-    await releaseAccount(platform, ledgerAccountId, !!result.answerText && !result.loginRequired, result.loginRequired);
+    await releaseAccount(platform, ledgerAccountId, !!result.answerText && !result.loginRequired, result.loginRequired, result.usedDps);
     // ⚠️ 登录平台：打开登录账号目录后仍检测到登录墙（磁盘登录态失效/从未落盘）→ 明确失败并提示重登，
     // 绝不默默以匿名/未登录态跑完冒充成功（2026-09-07 文心实测：登录目录无 BDUSS，整轮匿名问答还报 ok）。
     // 上面 releaseAccount 的 loginRequired=true 分支已把该账号标 failed，此处抛错终止本轮。
@@ -717,7 +717,7 @@ app.post('/api/accounts/:platform', async (req, res) => {
       return;
     }
     if (found.enabled === false) {
-      res.status(400).json({ msg: '该代理已停用，请先在代理管理里启用' });
+      res.status(400).json({ msg: '该静态IP已停用，请先在静态IP管理里启用' });
       return;
     }
     ip = found;
@@ -746,9 +746,8 @@ app.post('/api/accounts/:platform', async (req, res) => {
   });
 });
 
-// 账号绑定 / 解绑代理 IP：绑定或换绑（含解绑）后账号必须重新登录（旧登录态归属旧出口，换出口即失效）
-// 2026-09-22：宿主机直连也是池内一行（127.0.0.1:0, protocol=direct），账号绑它即走宿主机出口；
-// 解绑（proxyId=null）= 不绑任何 IP，不参与词级调度。
+// 账号绑定 / 解绑静态代理：绑定或换绑后账号必须重新登录（旧登录态归属旧出口，换出口即失效）
+// 解绑（proxyId=null）= 不绑静态代理，出口由账号 ipMode 决定。
 app.post('/api/accounts/:platform/:accountId/proxy', async (req, res) => {
   const platform = String(req.params.platform).toLowerCase();
   const accountId = String(req.params.accountId);
@@ -783,7 +782,7 @@ app.post('/api/accounts/:platform/:accountId/proxy', async (req, res) => {
       return;
     }
     if (ip.enabled === false) {
-      res.status(400).json({ msg: '该代理已停用，请先在代理管理里启用' });
+      res.status(400).json({ msg: '该静态IP已停用，请先在静态IP管理里启用' });
       return;
     }
     await accountRepo().patch(platform, accountId, {
@@ -816,8 +815,18 @@ app.post('/api/accounts/:platform/:accountId/ip-mode', async (req, res) => {
     return;
   }
   try {
-    await accountRepo().patch(platform, accountId, { ipMode: ipMode as 'local' | 'static' | 'dynamic' });
-    res.status(200).json({ ok: true, msg: `出口模式已设为 ${ipMode}（切换出口不影响已登录态，无需重新登录）` });
+    if (ipMode === 'static') {
+      const proxies = await proxyRepo().list();
+      const hasStatic = proxies.some((p) => p.port > 0 && p.enabled !== false);
+      if (!hasStatic) {
+        res.status(400).json({ msg: '无可用静态代理，请先到静态IP管理添加' });
+        return;
+      }
+    }
+    const patch: Partial<Account> = { ipMode: ipMode as 'local' | 'static' | 'dynamic' };
+    if (ipMode !== 'static') patch.proxyId = undefined; // local/dynamic 时清空 proxyId
+    await accountRepo().patch(platform, accountId, patch);
+    res.status(200).json({ ok: true, msg: '切换成功' });
   } catch (e) {
     res.status(500).json({ msg: `设置失败：${(e as Error).message}` });
   }
@@ -1095,8 +1104,6 @@ export async function startServer(): Promise<void> {
   await pingDb();
   const recycled = await releaseStaleLeases(config.nodeId);
   console.log(`[db] 连接正常 (${config.db.host}:${config.db.port}/${config.db.database})${recycled ? `，回收脏占用 ${recycled} 条` : ''}`);
-  // 确保宿主机直连行存在（seed，幂等）：host=127.0.0.1 port=0 protocol=direct，与代理 IP 一样参与调度
-  await proxyRepo().ensureDirectIp();
   // 清理服务重启后的 waiting 残留：内存登录会话已随进程丢失，waiting 账号无法再「验证登录」，
   // 统一重置为 none，避免账号卡在「登录窗口已打开，等待人工操作」无法手动清理
   await resetStaleWaiting();

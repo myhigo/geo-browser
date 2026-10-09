@@ -97,10 +97,6 @@ export interface AppConfig {
   artifactMode: ArtifactMode;
   /** 采集是否无头（登录窗口恒为有头） */
   headless: boolean;
-  /** 同时打开浏览器的上限 */
-  maxBrowsers: number;
-  /** 同一出口 IP 上同时跑的任务上限（1=同一 IP 串行，最安全；调大提速但风控风险上升） */
-  maxPerEgress: number;
   /** 代理 IP 冷却间隔（秒）：同一 IP 用完后需等待该时长才能再次被分配（默认 120） */
   ipIntervalSec: number;
   /** (平台,IP) 冷却间隔（秒）：调度 v2 用，同平台同 IP 两次使用之间的最小间隔（默认 120） */
@@ -188,8 +184,6 @@ export const config: AppConfig = {
   },
   artifactMode: env('GEO_ARTIFACT_MODE') === 'debug' ? 'debug' : 'none',
   headless: bool('GEO_HEADLESS', true),
-  maxBrowsers: num('GEO_MAX_BROWSERS', 4),
-  maxPerEgress: num('GEO_MAX_PER_EGRESS', 1),
   ipIntervalSec: num('GEO_IP_INTERVAL', 120),
   platformIpIntervalSec: num('GEO_PLATFORM_IP_INTERVAL', 120),
   schedulerTickSec: num('GEO_SCHEDULER_TICK', 10),
@@ -241,7 +235,6 @@ export function describeConfig(): string {
     `port=${config.port}`,
     `artifactMode=${config.artifactMode}`,
     `headless=${config.headless}`,
-    `maxBrowsers=${config.maxBrowsers}`,
     `dataRoot=${path.resolve(config.dataRoot)}`,
   ];
   if (config.pullHost) bits.push(`pullHost=${config.pullHost}`);
