@@ -77,6 +77,35 @@ export interface LaunchOpts {
   dynamic?: boolean;
 }
 
+/**
+ * 把浏览器窗口恢复并带到前台（只对有头模式有意义，无头没有窗口可操作）。
+ *
+ * Windows 上的两个坑（mac 正常，故只在这边出问题）：
+ *   ① 后台进程拉起的窗口可能被最小化；且 launchPersistentContext 会沿用上次关闭时的窗口状态。
+ *   ② 系统有前台锁定/焦点抢占限制，窗口未必能压到其他应用之上。
+ *
+ * 对策（两道，缺一不可）：
+ *   ① 浏览器级 CDP「Browser.setWindowBounds」把窗口从最小化恢复为 normal（顺带把窗口带出前台）。
+ *   ② page.bringToFront() 激活标签页（它只激活标签，解不了最小化，所以必须有 ①）。
+ *
+ * ⚠️ 用浏览器级 CDP 而非系统级脚本（osascript / PowerShell）：CDP 精确作用于**本次拉起的这个实例**，
+ *    并发多任务时不会误伤别的 Chrome 窗口；CDP 不可用（无头/版本差异）时静默降级到 bringToFront。
+ */
+async function raiseWindow(browser: Browser, context: BrowserContext, page: Page): Promise<void> {
+  try {
+    const bcdp = await browser.newBrowserCDPSession();
+    const pcdp = await context.newCDPSession(page);
+    const { targetInfo } = (await pcdp.send('Target.getTargetInfo')) as { targetInfo: { targetId: string } };
+    const { windowId } = (await bcdp.send('Browser.getWindowForTarget', {
+      targetId: targetInfo.targetId,
+    })) as { windowId: number };
+    await bcdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
+  } catch {
+    /* CDP 不可用（无头/版本差异）→ 忽略，交给下面的 bringToFront 兜底 */
+  }
+  await page.bringToFront().catch(() => {});
+}
+
 export async function runDiagnostic(
   question: string,
   opts: LaunchOpts = {}
@@ -135,7 +164,12 @@ async function runDiagnosticScoped(
     slowMo: headless ? 0 : 20, // headless 模式下不刻意放慢；非 headless 用于人工可视监控
     // 去掉 navigator.webdriver 等明显的自动化特征，降低被风控误判的概率。
     // ⚠️ 仅消除"我是脚本"的标记，**不绕过**任何验证码/登录/风控——该登录的照样人工登录。
-    args: ['--disable-blink-features=AutomationControlled'],
+    // Windows：后台进程拉起的 Chrome 会沿用上次关闭时的窗口状态（常被最小化/小窗口），
+    // 且系统有前台锁定，不会自动置前 → 强制最大化打开。mac 原生就会置前，无需加。
+    args:
+      process.platform === 'win32'
+        ? ['--disable-blink-features=AutomationControlled', '--start-maximized']
+        : ['--disable-blink-features=AutomationControlled'],
     // 去掉 Playwright 默认注入的 --enable-automation（会留下 cdc_ 钩子与 webdriver 标记）
     ignoreDefaultArgs: ['--enable-automation'],
     ...(proxy
@@ -226,6 +260,8 @@ async function runDiagnosticScoped(
   // 持久上下文（launchPersistentContext，走台账/登录 profile 时）自带一个初始空白标签页，
   // 直接复用它，避免出现「一个 blank + 一个业务页」两个标签。
   const page: Page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
+  // 有头模式：恢复窗口并置前（Windows 上窗口可能最小化且不压其他应用；mac 原生就会置前，此处等价补强）
+  if (!headless) await raiseWindow(browser, context, page);
   // 打印目录，便于排查「发送后弹出访达窗口」现象：对比访达标题栏路径是否与下面一致
   log(`📂 工作目录：${process.cwd()}`);
   log(`📂 本次样本库目录：${root}`);
@@ -347,6 +383,8 @@ async function runDiagnosticScoped(
       // 轮询「是否已出现输入框」作为登录成功的判定，与平台登录方式（短信/扫码/第三方）无关。
       if (loginRequired && opts.waitLoginMs && opts.waitLoginMs > 0 && opts.userDataDir) {
         const deadline = Date.now() + opts.waitLoginMs;
+        // 需要人工操作 → 再确保一次窗口不是最小化且在最上层（Windows 上可能被别的窗口压住）
+        await raiseWindow(browser, context, page);
         log(
           `\n🔑 请在弹出的浏览器窗口中手动登录「${def.label}」（最多等待 ${Math.round(opts.waitLoginMs / 1000)}s）…\n` +
             `   登录完成后无需任何操作，本程序会自动继续。\n`
