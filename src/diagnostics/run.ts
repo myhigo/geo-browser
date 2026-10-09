@@ -449,7 +449,7 @@ async function runDiagnosticScoped(
       capturedShots.push('03-answering.png');
 
       // 豆包等无文字级"生成结束"标志的平台：生成中途落盘一份 DOM，用于定标结束标志
-      await adapter.waitForAnswer(180000, path.join(root, 'page', 'answering.html'));
+      await adapter.waitForAnswer(180000, path.join(root, 'page', 'answering.html'), question);
       await page.screenshot({ path: path.join(dirS, '04-finished.png') });
       capturedShots.push('04-finished.png');
     } catch (e) {

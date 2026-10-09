@@ -40,7 +40,7 @@ export interface PlatformAdapter {
   sendQuestion(question: string): Promise<void>;
   // midDumpPath：可选。生成中途（约 20s 处）把当时 DOM 落盘到该路径，用于定标
   // 「生成中/已结束」的真实标志（豆包无文字级结束标记，靠样本迭代）。
-  waitForAnswer(timeoutMs?: number, midDumpPath?: string): Promise<void>;
+  waitForAnswer(timeoutMs?: number, midDumpPath?: string, question?: string): Promise<void>;
   getAnswer(): Promise<string | null>;
   expandSources(): Promise<void>;
   getSources(captureDir?: string): Promise<SourceInfo[] | null>;

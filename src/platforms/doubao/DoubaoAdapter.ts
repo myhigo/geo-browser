@@ -208,7 +208,7 @@ export class DoubaoAdapter implements PlatformAdapter {
   // 发送控件生成态（aria-busy=true，发送钮变方块停止图标）同为流式指示。
   // 无胶囊平台（如豆包）：退回「容器文本连续 30 次采样无增长」兜底。
   // timeoutMs 仅作整体防失控硬上限。
-  async waitForAnswer(timeoutMs = 180000, midDumpPath?: string): Promise<void> {
+  async waitForAnswer(timeoutMs = 180000, midDumpPath?: string, question?: string): Promise<void> {
     const start = Date.now();
     let midDumped = false;
 
@@ -280,7 +280,8 @@ export class DoubaoAdapter implements PlatformAdapter {
     let streamingSeen = 0;             // 观察到「流式输出中」的采样次数
     let noGrowthStreak = 0;            // 连续无增长采样次数
     let lastProgressLog = Date.now();
-    let captchaWaitMs = 0;             // 验证码在场累计等待（有上限，防无头模式挂死）
+    let refreshRetry = 0;              // 验证码刷新重发次数（上限 MAX_REFRESH）
+    const MAX_REFRESH = 3;            // 验证码刷新重发上限（用户 2026-10-09：选图类验证刷新重提即可正常回答）
     let lastCaptchaLog = 0;
     let captchaSeen = false;
     let deadline = start + timeoutMs; // 验证码等待会顺延 deadline（人工处理时间不计入回答预算）
@@ -307,31 +308,41 @@ export class DoubaoAdapter implements PlatformAdapter {
         noGrowthStreak += 1;
       }
 
-      // —— 验证码闸门：卡住且疑似验证码在场 → 暂停倒计时等人工（有头）/ 等 it 自行消失 ——
-      // ⚠️ 用户实测（2026-09-03）：豆包提交后可能弹「选图拖拽」验证码，人工处理期间
-      //    旧逻辑 30s 无增长就收车关浏览器，把正在生成的回答掐死。现在：验证码在场时
-      //    每秒顺延 deadline、清零无增长计数，最多累计等 3 分钟。
+      // —— 验证码自我恢复：等待回答时弹验证（实测选图类）→ 刷新页面 + 重新提问，最多 3 次 ——
+      // ⚠️ 用户实测（2026-10-09）：豆包点发送后等待回答时偶发选图验证，刷新重提即可正常回答。
+      //    检测到场 → 刷新 → 重发问题 → 重置等待状态继续；用尽 MAX_REFRESH 次仍卡则本轮失败。
       if (streamingSeen === 0 && noGrowthStreak >= 8) {
         const captcha = await isCaptchaUp();
         if (captcha) {
           captchaSeen = true;
-          noGrowthStreak = 0;
-          captchaWaitMs += 1000;
-          deadline += 1000; // 人工处理时间不挤占回答预算
-          if (Date.now() - lastCaptchaLog > 10000) {
+          if (refreshRetry < MAX_REFRESH) {
+            refreshRetry++;
             log(
-              `[${((Date.now() - start) / 1000).toFixed(1)}s] 🔒 检测到验证码，暂停超时倒计时等待处理（已等 ${Math.round(captchaWaitMs / 1000)}s）…`
+              `[${((Date.now() - start) / 1000).toFixed(1)}s] 🔒 检测到验证码（选图类等），刷新页面并重发（第 ${refreshRetry}/${MAX_REFRESH} 次）…`
             );
-            lastCaptchaLog = Date.now();
+            await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+            await this.page.waitForTimeout(1500);
+            try {
+              if (question) await this.sendQuestion(question);
+            } catch (e) {
+              log(`⚠️ 验证码刷新后重发失败：${(e as Error).message}`);
+            }
+            // 重置等待状态，进入新的一轮回答等待
+            streamingSeen = 0;
+            noGrowthStreak = 0;
+            lastLen = null;
+            deadline = Date.now() + timeoutMs;
+            lastProgressLog = Date.now();
+            lastCaptchaLog = 0;
+            if (midDumpPath) midDumped = false;
+            await this.page.waitForTimeout(1000);
+            continue;
           }
-          if (captchaWaitMs >= 180000) {
-            log(
-              `[${((Date.now() - start) / 1000).toFixed(1)}s] ⚠️ 验证码等待超过 3 分钟，按本轮失败继续（现场已保留）`
-            );
-            break;
-          }
-          await this.page.waitForTimeout(1000);
-          continue;
+          // 已用尽刷新次数仍卡验证：按本轮失败继续（保留现场，交由上层冷却/重试）
+          log(
+            `[${((Date.now() - start) / 1000).toFixed(1)}s] ⚠️ 验证码刷新重发 ${MAX_REFRESH} 次仍未通过，按本轮失败继续（现场已保留）`
+          );
+          break;
         }
       }
 
@@ -389,7 +400,7 @@ export class DoubaoAdapter implements PlatformAdapter {
       }
     }
     if (captchaSeen) {
-      log(`[${((Date.now() - start) / 1000).toFixed(1)}s] ℹ️ 本轮出现过验证码（累计等待 ${Math.round(captchaWaitMs / 1000)}s）`);
+      log(`[${((Date.now() - start) / 1000).toFixed(1)}s] ℹ️ 本轮出现过验证码（刷新重发 ${refreshRetry}/${MAX_REFRESH} 次）`);
     }
     log(`[${((Date.now() - start) / 1000).toFixed(1)}s] ✅ 回答输出完成，开始抽取`);
     await this.page.waitForTimeout(500); // 收尾缓冲
