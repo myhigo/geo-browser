@@ -14,6 +14,7 @@ import { resolvePlatform } from '../platforms/index.js';
 import { accountRepo, Account, accountDirOf } from '../storage/accountRepo.js';
 import { proxyRepo, isDirectIp } from '../storage/proxyRepo.js';
 import { paths, config } from '../config/index.js';
+import { raiseWindow } from '../windowRaise.js';
 
 /** 传给 Playwright 的代理选项（直连/不存在/未启用 → undefined 表示不注入） */
 export type ProxyOpts = { server: string; username?: string; password?: string; bypass?: string };
@@ -393,9 +394,10 @@ function launchOpts(proxy?: ProxyOpts): Parameters<typeof chromium.launchPersist
     channel: 'chrome',
     args: ['--disable-blink-features=AutomationControlled'],
     ignoreDefaultArgs: ['--enable-automation'],
-    viewport: { width: 1280, height: 800 },
-    userAgent:
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+    // 不覆写 UA：真实系统 Chrome 的 UA 与 navigator.platform、sec-ch-ua 客户端提示天然一致；
+    // 硬编码假 UA（mac/Chrome124）与真实环境矛盾，属环境伪造特征，会触发平台风控（选图验证永不过）。
+    // viewport null = 关闭视口模拟，页面按真实窗口尺寸渲染，避免固定 1280x800 的模拟痕迹。
+    viewport: null,
   };
   if (proxy) {
     o.proxy = config.proxyBypass
@@ -645,6 +647,9 @@ export async function startLogin(
     let done = false;
     try {
       const page = context.pages()[0];
+      // 有头窗口：Windows 下后台服务拉起的窗口会继承隐藏态被最小化 → 恢复并置前（等人工登录必须可见）
+      const browser = context.browser();
+      if (browser) await raiseWindow(browser, context, page);
       const def = resolvePlatform(platformId);
       await page.goto(def.defaultUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
       // 区分三种结果：确认（true）→ 校验登录态；取消（false）→ 直接收尾不回写（cancelLogin 已置 none）；
@@ -915,6 +920,9 @@ export async function testAccount(
     .catch(() => {});
   const def = resolvePlatform(platformId);
   const page = context.pages()[0] || (await context.newPage());
+  // 有头窗口：恢复置前（Windows 下后台服务拉起的窗口会继承隐藏态被最小化）
+  const browser = context.browser();
+  if (browser) await raiseWindow(browser, context, page);
   await page.goto(def.defaultUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
   testSessions.set(key, context);
   // 标记占用：阻止采集挑到它（两个上下文不能共用一个 userDataDir）

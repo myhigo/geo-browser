@@ -7,6 +7,7 @@ import { probeElements } from './elementProbe.js';
 import { DiagnosticResult, ElementDiagnosisItem, SourceInfo, ScreenshotMode } from '../types.js';
 import { paths, config } from '../config/index.js';
 import { fetchDpsProxy } from '../proxy/dpsProxy.js';
+import { raiseWindow } from '../windowRaise.js';
 
 function ts(): string {
   const d = new Date();
@@ -75,35 +76,6 @@ export interface LaunchOpts {
   proxy?: { server: string; username?: string; password?: string };
   /** 出口模式=动态（按账号 ipMode 设置）：开浏览器前取快代理新 IP；失败回退到 proxy（静态/直连） */
   dynamic?: boolean;
-}
-
-/**
- * 把浏览器窗口恢复并带到前台（只对有头模式有意义，无头没有窗口可操作）。
- *
- * Windows 上的两个坑（mac 正常，故只在这边出问题）：
- *   ① 后台进程拉起的窗口可能被最小化；且 launchPersistentContext 会沿用上次关闭时的窗口状态。
- *   ② 系统有前台锁定/焦点抢占限制，窗口未必能压到其他应用之上。
- *
- * 对策（两道，缺一不可）：
- *   ① 浏览器级 CDP「Browser.setWindowBounds」把窗口从最小化恢复为 normal（顺带把窗口带出前台）。
- *   ② page.bringToFront() 激活标签页（它只激活标签，解不了最小化，所以必须有 ①）。
- *
- * ⚠️ 用浏览器级 CDP 而非系统级脚本（osascript / PowerShell）：CDP 精确作用于**本次拉起的这个实例**，
- *    并发多任务时不会误伤别的 Chrome 窗口；CDP 不可用（无头/版本差异）时静默降级到 bringToFront。
- */
-async function raiseWindow(browser: Browser, context: BrowserContext, page: Page): Promise<void> {
-  try {
-    const bcdp = await browser.newBrowserCDPSession();
-    const pcdp = await context.newCDPSession(page);
-    const { targetInfo } = (await pcdp.send('Target.getTargetInfo')) as { targetInfo: { targetId: string } };
-    const { windowId } = (await bcdp.send('Browser.getWindowForTarget', {
-      targetId: targetInfo.targetId,
-    })) as { windowId: number };
-    await bcdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
-  } catch {
-    /* CDP 不可用（无头/版本差异）→ 忽略，交给下面的 bringToFront 兜底 */
-  }
-  await page.bringToFront().catch(() => {});
 }
 
 export async function runDiagnostic(
@@ -198,11 +170,12 @@ async function runDiagnosticScoped(
   [dirS, dirP, dirN].forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
   const contextOpts: Parameters<Browser['newContext']>[0] = {
-    viewport: { width: 1280, height: 800 },
+    // viewport null = 关闭视口模拟，页面按真实窗口尺寸渲染（截图走 fullPage/滚动拼接，不依赖固定尺寸）。
+    // 不覆写 UA：真实系统 Chrome 的 UA 与 navigator.platform、sec-ch-ua 客户端提示天然一致；
+    // 硬编码假 UA（mac/Chrome124）与真实环境矛盾，属环境伪造特征，会触发平台风控。
+    viewport: null,
     acceptDownloads: false, // 不触发任何下载行为，避免系统下载条/对话框
     ...(dbg ? { recordHar: { path: path.join(dirN, 'network.har') } } : {}),
-    userAgent:
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
   };
   // 登录态：给了 profile 目录就走持久上下文（登录态落盘，下次复用）；否则仍是临时匿名上下文。
   // ⚠️ 两种模式共用的只有「上下文选项」，浏览器实例与关闭顺序不同，故分开建。
