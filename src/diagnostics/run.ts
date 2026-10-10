@@ -136,12 +136,20 @@ async function runDiagnosticScoped(
     slowMo: headless ? 0 : 20, // headless 模式下不刻意放慢；非 headless 用于人工可视监控
     // 去掉 navigator.webdriver 等明显的自动化特征，降低被风控误判的概率。
     // ⚠️ 仅消除"我是脚本"的标记，**不绕过**任何验证码/登录/风控——该登录的照样人工登录。
-    // Windows：后台进程拉起的 Chrome 会沿用上次关闭时的窗口状态（常被最小化/小窗口），
-    // 且系统有前台锁定，不会自动置前 → 强制最大化打开。mac 原生就会置前，无需加。
+    // 窗口几何：配置了 GEO_WINDOW → 按配置尺寸/位置开窗（与登录/测试窗口统一）；
+    // 未配置 → 维持原状：Windows 强制最大化打开（后台进程拉起的窗口常被最小化），mac 原生置前即可。
     args:
-      process.platform === 'win32'
-        ? ['--disable-blink-features=AutomationControlled', '--start-maximized']
-        : ['--disable-blink-features=AutomationControlled'],
+      config.windowSize
+        ? [
+            '--disable-blink-features=AutomationControlled',
+            `--window-size=${config.windowSize.width},${config.windowSize.height}`,
+            ...(config.windowSize.x != null && config.windowSize.y != null
+              ? [`--window-position=${config.windowSize.x},${config.windowSize.y}`]
+              : []),
+          ]
+        : process.platform === 'win32'
+          ? ['--disable-blink-features=AutomationControlled', '--start-maximized']
+          : ['--disable-blink-features=AutomationControlled'],
     // 去掉 Playwright 默认注入的 --enable-automation（会留下 cdc_ 钩子与 webdriver 标记）
     ignoreDefaultArgs: ['--enable-automation'],
     ...(proxy

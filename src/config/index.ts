@@ -52,6 +52,23 @@ const bool = (k: string, d: boolean): boolean => {
   return v === '1' || v.toLowerCase() === 'true';
 };
 
+/** 窗口尺寸配置：GEO_WINDOW=宽,高[,X,Y]。未配置/格式非法 → undefined（走浏览器默认行为） */
+const windowSize = (k: string): { width: number; height: number; x?: number; y?: number } | undefined => {
+  const v = env(k);
+  if (!v) return undefined;
+  const parts = v.split(',').map((s) => Number(s.trim()));
+  if (parts.length < 2 || parts.some((n) => !Number.isFinite(n) || n < 0)) return undefined;
+  const out: { width: number; height: number; x?: number; y?: number } = {
+    width: Math.round(parts[0]),
+    height: Math.round(parts[1]),
+  };
+  if (parts.length >= 4) {
+    out.x = Math.round(parts[2]);
+    out.y = Math.round(parts[3]);
+  }
+  return out;
+};
+
 /** 产物模式：none=不落盘（生产默认）；debug=落 diagnostics/ 供选择器校准 */
 export type ArtifactMode = 'none' | 'debug';
 
@@ -95,6 +112,8 @@ export interface AppConfig {
   dps: DpsConfig;
   /** 产物是否落盘 */
   artifactMode: ArtifactMode;
+  /** 浏览器窗口尺寸/位置（GEO_WINDOW=宽,高[,X,Y]）：设置后登录/测试/采集窗口统一按此开；不设走浏览器默认 */
+  windowSize?: { width: number; height: number; x?: number; y?: number };
   /** 采集是否无头（登录窗口恒为有头） */
   headless: boolean;
   /** 代理 IP 冷却间隔（秒）：同一 IP 用完后需等待该时长才能再次被分配（默认 120） */
@@ -183,6 +202,7 @@ export const config: AppConfig = {
     minTtlSec: num('GEO_DPS_MIN_TTL_SEC', 60),
   },
   artifactMode: env('GEO_ARTIFACT_MODE') === 'debug' ? 'debug' : 'none',
+  windowSize: windowSize('GEO_WINDOW'),
   headless: bool('GEO_HEADLESS', true),
   ipIntervalSec: num('GEO_IP_INTERVAL', 120),
   platformIpIntervalSec: num('GEO_PLATFORM_IP_INTERVAL', 120),

@@ -389,10 +389,18 @@ export function loginBusy(): { platformId?: string; accountId?: string } {
 }
 
 function launchOpts(proxy?: ProxyOpts): Parameters<typeof chromium.launchPersistentContext>[1] {
+  const args = ['--disable-blink-features=AutomationControlled'];
+  // 配置了 GEO_WINDOW → 按配置尺寸/位置开窗（与采集窗口统一，且显式几何不受隐藏服务最小化恢复的干扰）
+  if (config.windowSize) {
+    args.push(`--window-size=${config.windowSize.width},${config.windowSize.height}`);
+    if (config.windowSize.x != null && config.windowSize.y != null) {
+      args.push(`--window-position=${config.windowSize.x},${config.windowSize.y}`);
+    }
+  }
   const o: Parameters<typeof chromium.launchPersistentContext>[1] = {
     headless: false,
     channel: 'chrome',
-    args: ['--disable-blink-features=AutomationControlled'],
+    args,
     ignoreDefaultArgs: ['--enable-automation'],
     // 不覆写 UA：真实系统 Chrome 的 UA 与 navigator.platform、sec-ch-ua 客户端提示天然一致；
     // 硬编码假 UA（mac/Chrome124）与真实环境矛盾，属环境伪造特征，会触发平台风控（选图验证永不过）。
