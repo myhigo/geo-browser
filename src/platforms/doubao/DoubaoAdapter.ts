@@ -1,6 +1,8 @@
 import { Page, BrowserContext } from 'playwright';
 import { log, warn } from '../../log.js';
 import fs from 'fs';
+import path from 'node:path';
+import { paths } from '../../config/index.js';
 import sharp from 'sharp';
 import { DOUBAO_CANDIDATE_SELECTORS } from './selectors.js';
 import { firstFound } from '../../diagnostics/elementProbe.js';
@@ -51,11 +53,282 @@ export class DoubaoAdapter implements PlatformAdapter {
     return true; // 兜底：既无聊天输入框也无登录墙 → 保守视为未登录
   }
 
+  // 关闭对话页广告/活动弹窗（弹窗不关会挡住输入框，导致无法输入；遮罩面积大，带关闭叉号）。
+  // 判定：对输入框中心做 elementFromPoint 命中测试——命中的既不是输入框自身/内部、
+  // 也不是其祖先 → 有覆盖层遮挡。无遮挡时零动作，绝不乱点。
+  // 关闭四级递进（每级后复测，解除即停）：
+  //   ① 显式关闭控件：遮罩层内（fixed/absolute 且 z-index ≥ 50）class/aria/testid 含 close 的小控件；
+  //   ② 叉号识别：遮罩层内 10–80px 小控件，文本为 ✕/×/✖/⨯/X 或仅含 svg，按距遮罩右上角距离排序
+  //     （叉号惯常位置），最多点 3 个——豆包 class 为哈希，叉号常无 close 字样，靠形状兜底；
+  //   ③ 点遮罩：对遮罩容器本体派发 click（「点空白处关闭」型弹窗）；
+  //   ④ 强制隐藏：遮罩容器 display:none（关闭交互全部无效时的最终兜底）。
+  // 首次判定遮挡时把 DOM + 截图落盘 popup-samples/，供后续按真实 DOM 定标。
+  async dismissPopups(): Promise<void> {
+    const blockedExpr = () => {
+      const els = Array.from(
+        document.querySelectorAll('[contenteditable="true"], textarea')
+      ) as HTMLElement[];
+      const input = els.find((e) => {
+        const r = e.getBoundingClientRect();
+        return r.width > 40 && r.height > 10;
+      });
+      if (!input) return false;
+      const r = input.getBoundingClientRect();
+      const hit = document.elementFromPoint(
+        r.left + r.width / 2,
+        r.top + Math.min(r.height / 2, 20)
+      );
+      if (!hit) return false;
+      return !(hit === input || input.contains(hit) || hit.contains(input));
+    };
+    const blocked = (): Promise<boolean> => this.page.evaluate(blockedExpr).catch(() => false);
+    if (!(await blocked())) return;
+
+    // 样本落盘（每轮任务一次）：真实弹窗 DOM 罕见，落一次盘即可定标关闭控件
+    try {
+      const dir = path.join(paths.diagnosticsRoot, 'popup-samples', new Date().toISOString().replace(/[:.]/g, '-'));
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'page.html'), await this.page.content());
+      await this.page.screenshot({ path: path.join(dir, 'popup.png') });
+      log(`💾 弹窗样本已落盘：${dir}`);
+    } catch {
+      /* 样本落盘失败不影响关闭流程 */
+    }
+
+    // 遮罩层容器链：从命中元素向上收集所有 fixed/absolute 且 z-index≥50 的祖先
+    const overlayChainExpr = () => {
+      const els = Array.from(
+        document.querySelectorAll('[contenteditable="true"], textarea')
+      ) as HTMLElement[];
+      const input = els.find((e) => {
+        const r = e.getBoundingClientRect();
+        return r.width > 40 && r.height > 10;
+      });
+      if (!input) return null;
+      const r = input.getBoundingClientRect();
+      let hit = document.elementFromPoint(
+        r.left + r.width / 2,
+        r.top + Math.min(r.height / 2, 20)
+      ) as HTMLElement | null;
+      if (!hit) return null;
+      const chain: HTMLElement[] = [];
+      let a: HTMLElement | null = hit;
+      while (a && a !== document.body) {
+        const s = getComputedStyle(a);
+        if (
+          (s.position === 'fixed' || s.position === 'absolute') &&
+          parseInt(s.zIndex || '0', 10) >= 50
+        )
+          chain.push(a);
+        a = a.parentElement;
+      }
+      return { chain };
+    };
+
+    for (let round = 1; round <= 3 && (await blocked()); round++) {
+      let action = '';
+      // ① 显式关闭控件
+      const n1 = await this.page
+        .evaluate(() => {
+          const sels = [
+            '[class*="close"]',
+            '[aria-label="关闭"]',
+            '[aria-label="Close"]',
+            '[data-testid*="close"]',
+            'img[src*="close"]',
+          ];
+          const inOverlay = (el: Element): boolean => {
+            let a: HTMLElement | null = el as HTMLElement;
+            while (a && a !== document.body) {
+              const s = getComputedStyle(a);
+              if (
+                (s.position === 'fixed' || s.position === 'absolute') &&
+                parseInt(s.zIndex || '0', 10) >= 50
+              )
+                return true;
+              a = a.parentElement;
+            }
+            return false;
+          };
+          let n = 0;
+          const done = new Set<Element>();
+          for (const sel of sels) {
+            for (const el of Array.from(document.querySelectorAll(sel))) {
+              if (done.has(el)) continue;
+              done.add(el);
+              const he = el as HTMLElement;
+              const r = he.getBoundingClientRect();
+              if (r.width <= 0 || r.height <= 0 || r.width > 200 || r.height > 200) continue;
+              if (!inOverlay(el)) continue;
+              he.click();
+              n++;
+              if (n >= 5) return n;
+            }
+          }
+          return n;
+        })
+        .catch(() => 0);
+      if (n1 > 0) action = `显式关闭控件 ×${n1}`;
+      await this.page.waitForTimeout(600);
+      if (!(await blocked())) {
+        if (action) log(`🪟 [doubao] 弹窗已清除（${action || '自动'}）`);
+        return;
+      }
+
+      // ② 叉号识别（遮罩层内 10–80px，✕ 字形文本或仅 svg，按距遮罩右上角排序）
+      const n2 = await this.page
+        .evaluate(() => {
+          const els = Array.from(
+            document.querySelectorAll('[contenteditable="true"], textarea')
+          ) as HTMLElement[];
+          const input = els.find((e) => {
+            const r = e.getBoundingClientRect();
+            return r.width > 40 && r.height > 10;
+          });
+          if (!input) return 0;
+          const r0 = input.getBoundingClientRect();
+          let hit = document.elementFromPoint(
+            r0.left + r0.width / 2,
+            r0.top + Math.min(r0.height / 2, 20)
+          ) as HTMLElement | null;
+          if (!hit) return 0;
+          // 最近的遮罩层容器（叉号的直接宿主）
+          let mask: HTMLElement | null = null;
+          let a: HTMLElement | null = hit;
+          while (a && a !== document.body) {
+            const s = getComputedStyle(a);
+            if (
+              (s.position === 'fixed' || s.position === 'absolute') &&
+              parseInt(s.zIndex || '0', 10) >= 50
+            ) {
+              mask = a;
+              break;
+            }
+            a = a.parentElement;
+          }
+          if (!mask) return 0;
+          const mr = mask.getBoundingClientRect();
+          const tr = { x: mr.right, y: mr.top }; // 叉号惯常位置：遮罩右上角
+          const cands: HTMLElement[] = [];
+          for (const el of Array.from(mask.querySelectorAll('*'))) {
+            const he = el as HTMLElement;
+            const r = he.getBoundingClientRect();
+            if (r.width < 10 || r.height < 10 || r.width > 80 || r.height > 80) continue;
+            if (he.children.length > 2) continue;
+            const txt = (he.textContent || '').trim();
+            const isCrossTxt = /^[✕×✖⨯Xx]$/.test(txt);
+            const isSvgOnly = !txt && !!he.querySelector('svg');
+            if (isCrossTxt || isSvgOnly) cands.push(he);
+          }
+          cands.sort(
+            (p, q) =>
+              Math.hypot(p.getBoundingClientRect().right - tr.x, p.getBoundingClientRect().top - tr.y) -
+              Math.hypot(q.getBoundingClientRect().right - tr.x, q.getBoundingClientRect().top - tr.y)
+          );
+          cands.slice(0, 3).forEach((he) => he.click());
+          return Math.min(cands.length, 3);
+        })
+        .catch(() => 0);
+      if (n2 > 0) action = `叉号识别 ×${n2}`;
+      await this.page.waitForTimeout(600);
+      if (!(await blocked())) {
+        if (action) log(`🪟 [doubao] 弹窗已清除（${action || '自动'}）`);
+        return;
+      }
+
+      // ③ 点遮罩容器本体（「点空白处关闭」型）
+      const maskClicked = await this.page
+        .evaluate(() => {
+          const els = Array.from(
+            document.querySelectorAll('[contenteditable="true"], textarea')
+          ) as HTMLElement[];
+          const input = els.find((e) => {
+            const r = e.getBoundingClientRect();
+            return r.width > 40 && r.height > 10;
+          });
+          if (!input) return false;
+          const r = input.getBoundingClientRect();
+          const hit = document.elementFromPoint(
+            r.left + r.width / 2,
+            r.top + Math.min(r.height / 2, 20)
+          ) as HTMLElement | null;
+          if (!hit) return false;
+          let a: HTMLElement | null = hit;
+          while (a && a !== document.body) {
+            const s = getComputedStyle(a);
+            if (
+              (s.position === 'fixed' || s.position === 'absolute') &&
+              parseInt(s.zIndex || '0', 10) >= 50
+            ) {
+              a.click();
+              return true;
+            }
+            a = a.parentElement;
+          }
+          return false;
+        })
+        .catch(() => false);
+      if (maskClicked) action = '点遮罩容器';
+      await this.page.waitForTimeout(600);
+      if (!(await blocked())) {
+        if (action) log(`🪟 [doubao] 弹窗已清除（${action}）`);
+        return;
+      }
+
+      // ④ 强制隐藏遮罩容器链（关闭交互全部无效的最终兜底）
+      const hidden = await this.page
+        .evaluate(() => {
+          const els = Array.from(
+            document.querySelectorAll('[contenteditable="true"], textarea')
+          ) as HTMLElement[];
+          const input = els.find((e) => {
+            const r = e.getBoundingClientRect();
+            return r.width > 40 && r.height > 10;
+          });
+          if (!input) return 0;
+          const r = input.getBoundingClientRect();
+          const hit = document.elementFromPoint(
+            r.left + r.width / 2,
+            r.top + Math.min(r.height / 2, 20)
+          ) as HTMLElement | null;
+          if (!hit) return 0;
+          let n = 0;
+          let a: HTMLElement | null = hit;
+          while (a && a !== document.body) {
+            const s = getComputedStyle(a);
+            if (
+              (s.position === 'fixed' || s.position === 'absolute') &&
+              parseInt(s.zIndex || '0', 10) >= 50
+            ) {
+              a.style.display = 'none';
+              n++;
+            }
+            a = a.parentElement;
+          }
+          return n;
+        })
+        .catch(() => 0);
+      if (hidden > 0) {
+        action = `强制隐藏遮罩节点 ×${hidden}`;
+        log(`🪟 [doubao] 弹窗已清除（${action}）`);
+      }
+      await this.page.waitForTimeout(500);
+      if (!(await blocked())) return;
+      await this.page.keyboard.press('Escape').catch(() => {});
+      await this.page.waitForTimeout(400);
+    }
+    if (await blocked()) {
+      warn('⚠️ [doubao] 弹窗遮挡仍未清除（已尝试关闭控件/叉号/点遮罩/强制隐藏），按原流程继续');
+    }
+  }
+
   // 输入并发送问题。
   // 豆包输入区是「textarea + Tiptap contenteditable」双控件：真实编辑器为
   // <div contenteditable="true" class="tiptap ProseMirror">。务必先把焦点真正落到可编辑区，
   // 否则 keyboard.type 会落空（点击可能被拦截 / 光标进了 textarea 镜像）。
   async sendQuestion(question: string): Promise<void> {
+    // 进对话页偶发广告/活动弹窗：不关会挡住输入 → 先检测并关闭
+    await this.dismissPopups();
     const input = await firstFound(this.page, this.selectors.input);
     if (!input) throw new Error('ELEMENT_NOT_FOUND: input');
 
