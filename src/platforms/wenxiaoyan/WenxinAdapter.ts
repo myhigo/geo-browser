@@ -5,7 +5,7 @@ import { WENXIN_CANDIDATE_SELECTORS } from './selectors.js';
 import { firstFound } from '../../diagnostics/elementProbe.js';
 import { elementToText } from '../textExtract.js';
 import { humanDelay } from '../../diagnostics/human.js';
-import { CandidateSelectors, PlatformAdapter, ScreenshotMode, SourceInfo } from '../../types.js';
+import { CandidateSelectors, PlatformAdapter, ScreenshotMode, SendState, SourceInfo } from '../../types.js';
 import { config } from '../../config/index.js';
 import {
   WENXIN_AD_AFTER,
@@ -232,11 +232,27 @@ export class WenxinAdapter implements PlatformAdapter {
   //     信号连续 3 次采样（≈3s）且见过增长 → 判定完成；
   //   - 无信号平台（页面没有胶囊/完成态元素，如豆包）→ 退回「容器文本连续 30 次采样无增长」兜底；
   //   - timeoutMs 仅作整体硬上限防失控。
+  // 发送控件状态（2026-10-12 定标）：span.ci-submit-button 内 img 生成中为 pause 图，待发送为 send-icon
+  async getSendState(): Promise<SendState> {
+    const pause = await this.page
+      .locator('.ci-submit-button img.ci-submit-pause')
+      .count()
+      .catch(() => 0);
+    if (pause > 0) return 'generating';
+    const send = await this.page
+      .locator('.ci-submit-button img[src*="send-icon"]')
+      .count()
+      .catch(() => 0);
+    return send > 0 ? 'send' : 'unknown';
+  }
+
   // 等待流式回答完整输出（全元素驱动，无固定分段时间）。
   // 完成判定的「明确元素」= 回答容器（.chat-search-answer-generate/.answer-box）自身文本：
   //   - 流式阶段：容器文本持续生长（everGrew 计数）→ 确证"正在输出"；
   //   - 完成：曾明显生长 + 流式胶囊已消失 + 连续 ~6s 无新增 → 判定完成（不再空等 30s）。
   // 兜底：若文本始终未增长（检索/风控/未返回），连续 30s 无变化才判定完成（用户认可的安全兜底）。
+  // ⚠️ 全部纯文本兜底仅在发送控件非生成态（ci-submit-pause 不在场）时生效——思考中文本不增长
+  //    但仍在输出，不可判完成（2026-10-12 用户提示；getSendState 返回 unknown 时保持原行为）。
   // ⚠️ 不再依赖 [class*="answer-finished"]：实测该 class 仅存在于 CSS 定义，未挂到任何真实元素，
   //    不可作运行时完成信号（这正是此前总走 30s 兜底的根因）。
   async waitForAnswer(timeoutMs = 180000): Promise<void> {
@@ -267,6 +283,7 @@ export class WenxinAdapter implements PlatformAdapter {
     let everGrew = 0;                  // 见过文本增长（>=2 次确证确实在流式输出）
     let noGrowthStreak = 0;            // 连续无增长采样次数
     let lastProgressLog = Date.now();
+    let endedExplicitly = false;       // 动作栏明确完成退出（挂死日志不提示）
 
     // 「回答已完成」标志（2026-09-04 用户提议，与豆包同思路）：回答完成后动作栏才出现，
     // 复制图标用语义稳定的 `cos-icon cos-icon-copy`。多轮对话旧回答也有动作栏 →
@@ -299,32 +316,36 @@ export class WenxinAdapter implements PlatformAdapter {
         noGrowthStreak += 1;
       }
 
+      // 发送控件生成态 = 思考/输出中，纯文本兜底一律不得判完成（2026-10-12 用户提示）
+      const st = await this.getSendState();
+
       // —— 结束判定 ⓪ 动作栏出现 = 明确完成（优先级最高，用户 2026-09-04 提议）——
       const bars = await countActionBar();
       if (bars > actionBaseline) {
         log(
           `[${((Date.now() - start) / 1000).toFixed(0)}s] 🏁 检测到回答动作栏（复制/朗读/…），回答已完成（当前 ${lastLen ?? 0} 字）`
         );
+        endedExplicitly = true;
         break;
       }
 
       // —— 结束判定 ——
       // ① 主判定（明确元素驱动）：文本曾明显生长 + 流式胶囊已消失 + 连续 6s 无新增 → 完成
-      if (everGrew >= 2 && !streaming && noGrowthStreak >= 6) {
+      if (everGrew >= 2 && !streaming && noGrowthStreak >= 6 && st !== 'generating') {
         log(
           `[${((Date.now() - start) / 1000).toFixed(0)}s] 🏁 回答文本已稳定（峰值 ${lastLen ?? 0} 字，胶囊消失，连续 6s 无新增）→ 完成`
         );
         break;
       }
       // ③ 安全网：文本已生长但胶囊异常长期不消失 → 连续 20s 无新增强制结束（防胶囊卡死导致空等超时）
-      if (everGrew >= 2 && noGrowthStreak >= 20) {
+      if (everGrew >= 2 && noGrowthStreak >= 20 && st !== 'generating') {
         log(
           `[${((Date.now() - start) / 1000).toFixed(0)}s] 🏁 文本已稳定 20s（胶囊状态异常但内容无变化）→ 完成`
         );
         break;
       }
       // ② 兜底（无增长信号：可能检索/风控/未返回）：连续 30s 无变化
-      if (everGrew === 0 && noGrowthStreak >= 30) {
+      if (everGrew === 0 && noGrowthStreak >= 30 && st !== 'generating') {
         log(
           `[${((Date.now() - start) / 1000).toFixed(0)}s] 🏁 未见文本增长，连续 30s 无变化（兜底）→ 完成`
         );
@@ -341,6 +362,11 @@ export class WenxinAdapter implements PlatformAdapter {
       }
 
       await this.page.waitForTimeout(1000);
+    }
+    // 挂死识别：等待结束时发送控件仍处于生成态（流未断但无输出，疑似风控/服务异常）。
+    // 动作栏明确完成退出时不提示——退出瞬间控件可能尚未翻回发送态，属误报（2026-10-12 实测）。
+    if (!endedExplicitly && (await this.getSendState()) === 'generating') {
+      log('⚠️ 等待结束时发送控件仍处于生成态（疑似挂死/风控），本轮结果可能为空');
     }
     log(`[${((Date.now() - start) / 1000).toFixed(0)}s] ✅ 回答输出完成，开始抽取`);
     await this.page.waitForTimeout(800); // 收尾缓冲，确保末字渲染完整

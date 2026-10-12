@@ -6,7 +6,7 @@ import { QIANWEN_CANDIDATE_SELECTORS } from './selectors.js';
 import { firstFound } from '../../diagnostics/elementProbe.js';
 import { elementToText } from '../textExtract.js';
 import { humanClick, humanDrag, humanDelay } from '../../diagnostics/human.js';
-import { CandidateSelectors, PlatformAdapter, SourceInfo, ScreenshotMode } from '../../types.js';
+import { CandidateSelectors, PlatformAdapter, SendState, SourceInfo, ScreenshotMode } from '../../types.js';
 import { config } from '../../config/index.js';
 import {
   QIANWEN_AD_A_AFTER,
@@ -133,10 +133,23 @@ export class QianwenAdapter implements PlatformAdapter {
     }
   }
 
+  // 发送控件状态（2026-10-12 定标）：aria-label 在「发送消息 ↔ 停止回答」间切换
+  async getSendState(): Promise<SendState> {
+    if ((await this.page.locator('button[aria-label="停止回答"]').count().catch(() => 0)) > 0) {
+      return 'generating';
+    }
+    if ((await this.page.locator('button[aria-label="发送消息"]').count().catch(() => 0)) > 0) {
+      return 'send';
+    }
+    return 'unknown';
+  }
+
   // 等待流式回答完整输出（全元素驱动，无固定分段时间）。
   //   完成信号（权威）：千问回答 markdown 渲染完成后会给根节点加 `qk-markdown-complete` 类
   //     —— 这是真实「已输出完毕」标志，优先据此判定。
   //   兜底信号：回答容器文本连续无增长（everGrew 后稳定 / 从未增长但已长时间稳定，应对缓存式瞬时答案）。
+  //   ⚠️ 纯文本兜底仅在发送控件非生成态时生效——思考中文本不增长但仍在输出，不可判完成
+  //     （2026-10-12 用户提示；getSendState 返回 unknown 时保持原行为，锚点失效不致死等）。
   //   ⚠️ 绝不靠全局 `[class*="loading"]` 判定流式——千问左侧导航常驻 `rn-right-navigator-loading-empty`
   //     占位元素（宽度>0），会制造"永远在输出"的假阳性，实测把等待拖满 180s 超时（2026-08-31 踩坑）。
   async waitForAnswer(timeoutMs = 180000): Promise<void> {
@@ -164,6 +177,7 @@ export class QianwenAdapter implements PlatformAdapter {
     let everGrew = false;
     let noGrowth = 0;
     let lastProgressLog = Date.now();
+    let endedExplicitly = false; // 官方完成 class 退出（挂死日志不提示）
 
     while (Date.now() - start < timeoutMs) {
       const len = await getAnswerLen();
@@ -182,20 +196,23 @@ export class QianwenAdapter implements PlatformAdapter {
         noGrowth += 1;
       }
 
+      // 发送控件生成态 = 思考/输出中，纯文本兜底一律不得判完成（2026-10-12 用户提示）
+      const st = await this.getSendState();
       // 完成判定（任一满足即收尾）：
       if (complete && noGrowth >= 2) {
         log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 回答完成标志 qk-markdown-complete 出现且文本稳定，当前 ${lastLen ?? 0} 字`
         );
+        endedExplicitly = true;
         break;
       }
-      if (everGrew && noGrowth >= 8) {
+      if (everGrew && noGrowth >= 8 && st !== 'generating') {
         log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 已生长后文本连续 8s 无增长（兜底），当前 ${lastLen ?? 0} 字`
         );
         break;
       }
-      if (noGrowth >= 40) {
+      if (noGrowth >= 40 && st !== 'generating') {
         log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 文本连续 40s 无增长（可能缓存/瞬时答案），当前 ${lastLen ?? 0} 字`
         );
@@ -211,6 +228,11 @@ export class QianwenAdapter implements PlatformAdapter {
       }
 
       await this.page.waitForTimeout(1000);
+    }
+    // 挂死识别：等待结束时发送控件仍处于生成态（流未断但无输出，疑似风控/服务异常）。
+    // 官方完成 class 退出时不提示——退出瞬间控件可能尚未翻回发送态，属误报（2026-10-12 实测）。
+    if (!endedExplicitly && (await this.getSendState()) === 'generating') {
+      log('⚠️ 等待结束时发送控件仍处于生成态（疑似挂死/风控），本轮结果可能为空');
     }
     log(`[${((Date.now() - start) / 1000).toFixed(1)}s] ✅ 回答输出完成，开始抽取`);
     await this.page.waitForTimeout(500); // 收尾缓冲

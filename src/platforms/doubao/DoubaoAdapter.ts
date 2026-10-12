@@ -7,7 +7,7 @@ import sharp from 'sharp';
 import { DOUBAO_CANDIDATE_SELECTORS } from './selectors.js';
 import { firstFound } from '../../diagnostics/elementProbe.js';
 import { elementToText } from '../textExtract.js';
-import { CandidateSelectors, PlatformAdapter, ScreenshotMode, SourceInfo } from '../../types.js';
+import { CandidateSelectors, PlatformAdapter, ScreenshotMode, SendState, SourceInfo } from '../../types.js';
 import {
   DOUBAO_INPUT_FOCUS_AFTER,
   DOUBAO_INPUT_FOCUS_SETTLE,
@@ -27,6 +27,20 @@ export class DoubaoAdapter implements PlatformAdapter {
 
   // 判断是否出现登录墙（豆包为登录制，匿名无法使用）。
   // ⚠️ 登录墙**优先于**输入框判定：登录-required 平台常在「输入框之上」覆盖登录弹层/遮罩，
+  // 发送控件状态（2026-10-12 定标）：生成中发送钮被中断钮替换，中断钮消失即回到发送态
+  async getSendState(): Promise<SendState> {
+    const brk = await this.page
+      .locator('[data-testid="chat_input_local_break_button"]')
+      .count()
+      .catch(() => 0);
+    if (brk > 0) return 'generating';
+    const send = await this.page
+      .locator('.guidance-input-actions button[class*="rounded-full"]')
+      .count()
+      .catch(() => 0);
+    return send > 0 ? 'send' : 'unknown';
+  }
+
   // 登录墙检测（2026-09-08 修正）：
   //  ⚠️ 旧逻辑「先查登录墙 a:has-text("登录")」会被历史会话里含「登录」二字的 <a> 链接误判为登录入口
   //    （如用户消息「微信授权登录实现」）→ 已登录被当成登录墙。改为**正向判定已登录**：
@@ -498,10 +512,12 @@ export class DoubaoAdapter implements PlatformAdapter {
         }, growthSel)
         .catch(() => null);
 
-    // 「流式输出中」= 加载胶囊可见，或发送控件处于生成态（aria-busy=true，方块停止图标）
+    // 「流式输出中」= 中断钮在场（发送钮被替换，2026-10-12 定标），或加载胶囊可见，
+    // 或发送控件处于生成态（aria-busy=true，方块停止图标）
     const isStreaming = (): Promise<boolean> =>
       this.page
         .evaluate(() => {
+          if (document.querySelector('[data-testid="chat_input_local_break_button"]')) return true;
           const cap = document.querySelector('[class*="capsule-loading"]');
           if (cap && (cap as HTMLElement).getBoundingClientRect().width > 0) return true;
           return !!document.querySelector('[aria-busy="true"]');
@@ -557,11 +573,13 @@ export class DoubaoAdapter implements PlatformAdapter {
     const MAX_REFRESH = 3;            // 验证码刷新重发上限（用户 2026-10-09：选图类验证刷新重提即可正常回答）
     let lastCaptchaLog = 0;
     let captchaSeen = false;
+    let endedExplicitly = false;      // 动作栏/流式完成等明确信号退出（挂死日志不提示）
     let deadline = start + timeoutMs; // 验证码等待会顺延 deadline（人工处理时间不计入回答预算）
 
     while (Date.now() < deadline) {
       const len = await getAnswerLen();
       const streaming = await isStreaming();
+      const st = await this.getSendState();
 
       if (streaming) {
         streamingSeen += 1; // 进入过流式输出（后续胶囊消失才代表结束）
@@ -625,19 +643,21 @@ export class DoubaoAdapter implements PlatformAdapter {
         log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 检测到回答动作栏（复制/朗读/…/更多），回答已完成（当前 ${lastLen ?? 0} 字）`
         );
+        endedExplicitly = true;
         break;
       }
 
       // —— 结束判定 ——
-      // ① 见过流式输出 → 胶囊消失 + 连续 5 次无增长 = 完成
-      if (streamingSeen >= 1 && !streaming && noGrowthStreak >= 5) {
+      // ① 见过流式输出 → 胶囊消失 + 连续 5 次无增长 = 完成（生成态一律不判完成）
+      if (streamingSeen >= 1 && !streaming && noGrowthStreak >= 5 && st !== 'generating') {
         log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 流式胶囊消失且文本稳定，当前 ${lastLen ?? 0} 字`
         );
+        endedExplicitly = true;
         break;
       }
-      // ② 该平台无胶囊（从未见过流式信号）→ 连续 30 次无增长兜底
-      if (streamingSeen === 0 && noGrowthStreak >= 30) {
+      // ② 该平台无胶囊（从未见过流式信号）→ 连续 30 次无增长兜底（生成态一律不判完成）
+      if (streamingSeen === 0 && noGrowthStreak >= 30 && st !== 'generating') {
         const barsNow = await countActionBar();
         log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 无流式信号，文本连续 30s 无增长（兜底），当前 ${lastLen ?? 0} 字（动作栏 ${barsNow}/基线 ${actionBaseline}）`
@@ -674,6 +694,11 @@ export class DoubaoAdapter implements PlatformAdapter {
     }
     if (captchaSeen) {
       log(`[${((Date.now() - start) / 1000).toFixed(1)}s] ℹ️ 本轮出现过验证码（刷新重发 ${refreshRetry}/${MAX_REFRESH} 次）`);
+    }
+    // 挂死识别：等待结束时中断钮仍在场（流未断但无输出，疑似风控/服务异常）。
+    // 明确完成信号退出时不提示——动作栏已出现时中断钮可能短暂残留，属误报（2026-10-12 实测）。
+    if (!endedExplicitly && streamingSeen >= 1 && (await this.getSendState()) === 'generating') {
+      log('⚠️ 等待结束时发送控件仍处于生成态（疑似挂死/风控），本轮结果可能为空');
     }
     log(`[${((Date.now() - start) / 1000).toFixed(1)}s] ✅ 回答输出完成，开始抽取`);
     await this.page.waitForTimeout(500); // 收尾缓冲

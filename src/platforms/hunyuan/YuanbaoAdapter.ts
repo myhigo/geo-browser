@@ -8,7 +8,7 @@ import { firstFound } from '../../diagnostics/elementProbe.js';
 import { elementToText } from '../textExtract.js';
 import { humanClick } from '../../diagnostics/human.js';
 import { randWaitMs } from '../../tuning/delays.js';
-import { CandidateSelectors, PlatformAdapter, SourceInfo, ScreenshotMode } from '../../types.js';
+import { CandidateSelectors, PlatformAdapter, SendState, SourceInfo, ScreenshotMode } from '../../types.js';
 import { config } from '../../config/index.js';
 
 // 元宝引用数据提取（运行在 Node 侧，非浏览器上下文）：聊天 API 响应为 SSE，
@@ -186,6 +186,18 @@ export class YuanbaoAdapter implements PlatformAdapter {
   // 登录墙检测（初版）：用「通用输入框」判定而非未校准的占位候选选择器——
   // 元宝对话页（已登录）必有可对话输入框（contenteditable/textarea/input），命中即视为可对话（已登录）；
   // 否则看有无登录入口，都没有则兜底视为需登录。⚠️ 待落盘真实 DOM 后若有特例再补元宝专属 marker。
+  // 发送控件状态（2026-10-12 定标）：#yuanbao-send-btn 的 aria-label 在「发送 ↔ 停止回答」间切换
+  async getSendState(): Promise<SendState> {
+    const label = await this.page
+      .locator('#yuanbao-send-btn')
+      .first()
+      .getAttribute('aria-label')
+      .catch(() => null);
+    if (label === '停止回答') return 'generating';
+    if (label === '发送') return 'send';
+    return 'unknown';
+  }
+
   async checkLogin(): Promise<boolean> {
     const hasInput = await this.page
       .locator('textarea, input, [contenteditable="true"]')
@@ -318,16 +330,28 @@ export class YuanbaoAdapter implements PlatformAdapter {
   async waitForAnswer(timeoutMs = 180000): Promise<void> {
     const start = Date.now();
 
-    // 信号 A：AI 回答操作栏的「重新生成」或「赞/踩」按钮可见
-    const actionBarDone = this.page
-      .waitForSelector('[class*="Repeat_"], [class*="ToolbarSuitable_"]', {
-        timeout: timeoutMs,
-        state: 'visible',
-      })
-      .then(() => 'action-bar' as const)
-      .catch(() => 'action-bar-timeout' as const);
+    // 信号 A：AI 回答操作栏的「重新生成」或「赞/踩」按钮可见。
+    // 基线计数（2026-10-12 实测教训）：会话页残留上一轮回答的动作栏会让裸 waitForSelector
+    // 在 0.04s 即命中 → 假完成，可能把旧答案当本轮结果；与豆包/文心同思路，超过基线才算本轮完成。
+    const countActionBar = async (): Promise<number> =>
+      this.page
+        .evaluate(() => {
+          return Array.from(
+            document.querySelectorAll('[class*="Repeat_"], [class*="ToolbarSuitable_"]')
+          ).filter((b) => (b as HTMLElement).getBoundingClientRect().width > 0).length;
+        })
+        .catch(() => 0);
+    const actionBaseline = await countActionBar();
+    const actionBarDone = (async (): Promise<'action-bar' | 'action-bar-timeout'> => {
+      while (Date.now() - start < timeoutMs) {
+        if ((await countActionBar()) > actionBaseline) return 'action-bar';
+        await this.page.waitForTimeout(1000);
+      }
+      return 'action-bar-timeout';
+    })();
 
-    // 信号 B：文本长度先增长后稳定的兜底
+    // 信号 B：文本长度先增长后稳定的兜底（仅在发送控件非生成态时生效——思考中文本不增长
+    //    但仍在输出，不可判完成，2026-10-12 用户提示；unknown 时保持原行为）
     const textStableDone = (async (): Promise<'text-stable' | 'text-timeout' | 'text-stable-cache'> => {
       const growthSel = this.selectors.answerContainer.join(', ');
       const getAnswerLen = async (): Promise<number | null> =>
@@ -354,6 +378,8 @@ export class YuanbaoAdapter implements PlatformAdapter {
         }
 
         const len = await getAnswerLen();
+        // 发送控件生成态 = 思考/输出中，纯文本兜底一律不得判完成（2026-10-12 用户提示）
+        const st = await this.getSendState();
         if (len !== null) {
           if (lastLen === null) lastLen = len;
           else if (len > lastLen + 2) {
@@ -367,13 +393,13 @@ export class YuanbaoAdapter implements PlatformAdapter {
           noGrowth += 1;
         }
 
-        if (everGrew && noGrowth >= 8) {
+        if (everGrew && noGrowth >= 8 && st !== 'generating') {
           log(
             `[${(Date.now() - start) / 1000}s] 🏁 元宝回答文本连续 8s 无增长（兜底），当前 ${lastLen ?? 0} 字`
           );
           return 'text-stable';
         }
-        if (noGrowth >= 40) {
+        if (noGrowth >= 40 && st !== 'generating') {
           log(
             `[${(Date.now() - start) / 1000}s] 🏁 元宝文本连续 40s 无增长（可能缓存/瞬时答案），当前 ${lastLen ?? 0} 字`
           );
@@ -397,6 +423,11 @@ export class YuanbaoAdapter implements PlatformAdapter {
     log(
       `[${(Date.now() - start) / 1000}s] ✅ 元宝回答输出完成（信号: ${winner}），开始抽取`
     );
+    // 挂死识别：等待结束时发送控件仍处于生成态（流未断但无输出，疑似风控/服务异常）。
+    // 动作栏明确完成退出时不提示——退出瞬间控件可能尚未翻回发送态，属误报（2026-10-12 实测）。
+    if (winner !== 'action-bar' && (await this.getSendState()) === 'generating') {
+      log('⚠️ 等待结束时发送控件仍处于生成态（疑似挂死/风控），本轮结果可能为空');
+    }
     await this.page.waitForTimeout(500);
   }
 

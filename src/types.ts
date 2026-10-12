@@ -59,7 +59,16 @@ export interface PlatformAdapter {
   //   一次基本能过；但刷新会丢掉已输入的问题，故重开 = 重新导航 + 重发问题）。
   //   重发属于编排层职责，由 run.ts 提供；未提供则退化为「滑 N 次失败即转人工」。
   solveCaptcha?(captureDir?: string, restart?: () => Promise<void>): Promise<boolean>;
+  // 发送控件状态（2026-10-12 全平台实测定标）。可选钩子，平台私有实现，锚点均为语义级：
+  //   deepseek    发送图标 svg path 形状变化（send↔stop，与发送前基线比对）
+  //   doubao      生成中发送钮被中断钮替换（data-testid=chat_input_local_break_button）
+  //   qwen        发送按钮 aria-label：发送消息 ↔ 停止回答
+  //   hunyuan     #yuanbao-send-btn aria-label：发送 ↔ 停止回答
+  //   wenxiaoyan  span.ci-submit-button 内 img：ci-submit-pause（生成中）↔ send-icon（待发送）
+  getSendState?(): Promise<SendState>;
 }
+
+export type SendState = 'send' | 'generating' | 'unknown';
 
 export interface DiagnosticArtifacts {
   screenshots: string[]; // 相对样本目录的 4 阶段截图路径

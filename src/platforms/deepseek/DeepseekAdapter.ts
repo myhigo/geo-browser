@@ -9,7 +9,7 @@ import sharp from 'sharp';
 import { DEEPSEEK_CANDIDATE_SELECTORS } from './selectors.js';
 import { firstFound } from '../../diagnostics/elementProbe.js';
 import { elementToText } from '../textExtract.js';
-import { CandidateSelectors, PlatformAdapter, ScreenshotMode, SourceInfo } from '../../types.js';
+import { CandidateSelectors, PlatformAdapter, ScreenshotMode, SendState, SourceInfo } from '../../types.js';
 import {
   DEEPSEEK_INPUT_FOCUS_SETTLE,
   DEEPSEEK_INPUT_FOCUS_AFTER,
@@ -23,6 +23,8 @@ export class DeepseekAdapter implements PlatformAdapter {
   private baselineTextLen: number | null = null;
   // 发送瞬间的回答动作行基线：回答动作按钮带独立 hash（如 db183363），多轮旧回答也有 → 基线计数
   private actionRowBaseline = 0;
+  // 发送瞬间的发送图标 svg path 基线（send 态）；生成中 DeepSeek 切为 stop 图标 → 形状变化即生成态
+  private sendIconBaseline: string | null = null;
 
   constructor(
     private page: Page,
@@ -105,6 +107,36 @@ export class DeepseekAdapter implements PlatformAdapter {
     return true; // 既无聊天输入框、也无登录墙入口 → 保守视为未登录
   }
 
+  // 读发送控件的 svg path d（输入区向上找容器，取最后一个带 svg 的 role=button）。
+  // DeepSeek 生成中发送钮切为停止图标 → path 形状变化（2026-10-12 定标，无 aria 状态位）。
+  private async readSendIconD(): Promise<string | null> {
+    return this.page
+      .evaluate(() => {
+        const input = document.querySelector('textarea');
+        if (!input) return null;
+        let host: HTMLElement = input as HTMLElement;
+        for (let i = 0; i < 6 && host.parentElement; i++) {
+          host = host.parentElement;
+          if (host.querySelector('div[role="button"]')) break;
+        }
+        const btns = Array.from(host.querySelectorAll('div[role="button"]')).filter((b) => {
+          const r = (b as HTMLElement).getBoundingClientRect();
+          return r.width > 0 && b.querySelector('svg path');
+        });
+        const el = btns[btns.length - 1] as HTMLElement | undefined;
+        if (!el) return null;
+        return (el.querySelector('svg path') as SVGPathElement).getAttribute('d');
+      })
+      .catch(() => null);
+  }
+
+  // 发送控件状态：与发送前基线比对图标形状（2026-10-12 定标）。无基线时返回 unknown。
+  async getSendState(): Promise<SendState> {
+    const d = await this.readSendIconD();
+    if (!d || !this.sendIconBaseline) return 'unknown';
+    return d === this.sendIconBaseline ? 'send' : 'generating';
+  }
+
   // 输入并发送：聚焦 → 打字 → 回车（DeepSeek 输入框回车即发）；回车无效时点发送按钮兜底。
   async sendQuestion(question: string): Promise<void> {
     const input = await firstFound(this.page, this.selectors.input);
@@ -117,6 +149,9 @@ export class DeepseekAdapter implements PlatformAdapter {
 
     await this.humanType(question);
     await this.page.waitForTimeout(randWaitMs(DEEPSEEK_INPUT_PRE_ENTER));
+
+    // 发送前采集发送图标基线（此刻必为 send 态），供 getSendState 比对
+    this.sendIconBaseline = await this.readSendIconD();
 
     await this.page.keyboard.press('Enter');
     await this.page.waitForTimeout(800);
@@ -178,6 +213,8 @@ export class DeepseekAdapter implements PlatformAdapter {
     let everGrew = false;                  // 相对基线明显增长（答案确实流式输出过）
     let noGrowthStreak = 0;                // 连续无增长采样次数
     let lastProgressLog = Date.now();
+    let seenGenerating = false;            // 发送控件见过生成态（getSendState 状态机，2026-10-12 定标）
+    let endedExplicitly = false;           // 明确完成信号退出（动作行/发送态状态机，挂死日志不提示）
 
     while (Date.now() - start < timeoutMs) {
       const len = await getAnswerLen();
@@ -192,6 +229,17 @@ export class DeepseekAdapter implements PlatformAdapter {
       }
 
       // —— 结束判定 ——
+      // ⓪′ 发送控件状态机（2026-10-12 定标）：见过生成态 → 回到发送态 + 文本稳定 5s → 完成
+      //    （DeepSeek 无 aria 状态位，图标形状比对；比「文本稳定 10s」主判定更快更准）
+      const st = await this.getSendState();
+      if (st === 'generating') seenGenerating = true;
+      if (seenGenerating && st === 'send' && noGrowthStreak >= 5) {
+        log(
+          `[${((Date.now() - start) / 1000).toFixed(1)}s] 发送控件已回到发送态且文本稳定，回答已完成（当前 ${lastLen ?? 0} 字）`
+        );
+        endedExplicitly = true;
+        break;
+      }
       // ⚠️ DeepSeek 无官方状态 class；「回答动作行（复制/点赞/点踩…）出现且文本稳定 3s」
       //    作为明确完成标志（2026-09-04 用户提议：与文心底下按钮同思路）。
       //    多轮旧回答也有动作行 → 基线计数；文本稳定条件防止动作行在流式中途挂载导致截断。
@@ -200,17 +248,19 @@ export class DeepseekAdapter implements PlatformAdapter {
         log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 检测到回答动作行（复制/点赞/点踩…）且文本稳定，回答已完成（当前 ${lastLen ?? 0} 字）`
         );
+        endedExplicitly = true;
         break;
       }
-      // ① 主判定：答案流式输出过（相对基线明显增长）+ 连续 10s 无新增 → 完成
-      if (everGrew && noGrowthStreak >= 10) {
+      // ① 主判定：答案流式输出过（相对基线明显增长）+ 连续 10s 无新增 → 完成（生成态不判完成）
+      if (everGrew && noGrowthStreak >= 10 && st !== 'generating') {
         log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 回答已流式输出并稳定 10s（峰值 ${lastLen ?? 0} 字）→ 完成`
         );
         break;
       }
       // ② 安全网：始终未明显增长（搜索/思考阶段无渲染、缓存式瞬时答案或卡死）→ 45s 无变化继续
-      if (!everGrew && noGrowthStreak >= 45) {
+      //    发送控件仍在生成态（思考中文本不增长）→ 不判完成，继续等待（2026-10-12 用户提示）
+      if (!everGrew && noGrowthStreak >= 45 && st !== 'generating') {
         log(
           `[${((Date.now() - start) / 1000).toFixed(1)}s] 45s 未见文本明显增长（可能仍在思考/被风控），按超时继续`
         );
@@ -237,6 +287,11 @@ export class DeepseekAdapter implements PlatformAdapter {
           /* ignore */
         }
       }
+    }
+    // 挂死识别：等待结束时发送控件仍处于生成态（流未断但无输出，疑似风控/服务异常）。
+    // 明确完成信号退出时不提示——退出瞬间控件可能尚未翻回发送态，属误报（2026-10-12 实测）。
+    if (!endedExplicitly && seenGenerating && (await this.getSendState()) === 'generating') {
+      log('⚠️ 等待结束时发送控件仍处于生成态（疑似挂死/风控），本轮结果可能为空');
     }
     log(`[${((Date.now() - start) / 1000).toFixed(1)}s] 回答输出完成，开始抽取`);
     await this.page.waitForTimeout(500);
