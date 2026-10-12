@@ -14,7 +14,7 @@ import { resolvePlatform } from '../platforms/index.js';
 import { accountRepo, Account, accountDirOf } from '../storage/accountRepo.js';
 import { proxyRepo, isDirectIp } from '../storage/proxyRepo.js';
 import { paths, config } from '../config/index.js';
-import { raiseWindow } from '../windowRaise.js';
+import { raiseWindow, nextWindowPosition } from '../windowRaise.js';
 
 /** 传给 Playwright 的代理选项（直连/不存在/未启用 → undefined 表示不注入） */
 export type ProxyOpts = { server: string; username?: string; password?: string; bypass?: string };
@@ -390,11 +390,17 @@ export function loginBusy(): { platformId?: string; accountId?: string } {
 
 function launchOpts(proxy?: ProxyOpts): Parameters<typeof chromium.launchPersistentContext>[1] {
   const args = ['--disable-blink-features=AutomationControlled'];
-  // 配置了 GEO_WINDOW → 按配置尺寸/位置开窗（与采集窗口统一，且显式几何不受隐藏服务最小化恢复的干扰）
+  // 配置了 GEO_WINDOW → 按配置尺寸开窗（与采集窗口统一，且显式几何不受隐藏服务最小化恢复的干扰）；
+  // 位置在基准位上水平级联错开，避免多窗口完全重叠
   if (config.windowSize) {
     args.push(`--window-size=${config.windowSize.width},${config.windowSize.height}`);
     if (config.windowSize.x != null && config.windowSize.y != null) {
-      args.push(`--window-position=${config.windowSize.x},${config.windowSize.y}`);
+      const pos = nextWindowPosition({
+        x: config.windowSize.x,
+        y: config.windowSize.y,
+        width: config.windowSize.width,
+      });
+      args.push(`--window-position=${pos.x},${pos.y}`);
     }
   }
   const o: Parameters<typeof chromium.launchPersistentContext>[1] = {

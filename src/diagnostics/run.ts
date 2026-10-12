@@ -7,7 +7,7 @@ import { probeElements } from './elementProbe.js';
 import { DiagnosticResult, ElementDiagnosisItem, SourceInfo, ScreenshotMode } from '../types.js';
 import { paths, config } from '../config/index.js';
 import { fetchDpsProxy } from '../proxy/dpsProxy.js';
-import { raiseWindow } from '../windowRaise.js';
+import { raiseWindow, nextWindowPosition } from '../windowRaise.js';
 
 function ts(): string {
   const d = new Date();
@@ -136,20 +136,28 @@ async function runDiagnosticScoped(
     slowMo: headless ? 0 : 20, // headless 模式下不刻意放慢；非 headless 用于人工可视监控
     // 去掉 navigator.webdriver 等明显的自动化特征，降低被风控误判的概率。
     // ⚠️ 仅消除"我是脚本"的标记，**不绕过**任何验证码/登录/风控——该登录的照样人工登录。
-    // 窗口几何：配置了 GEO_WINDOW → 按配置尺寸/位置开窗（与登录/测试窗口统一）；
+    // 窗口几何：配置了 GEO_WINDOW → 按配置尺寸开窗（与登录/测试窗口统一），位置水平级联错开；
     // 未配置 → 维持原状：Windows 强制最大化打开（后台进程拉起的窗口常被最小化），mac 原生置前即可。
-    args:
-      config.windowSize
-        ? [
-            '--disable-blink-features=AutomationControlled',
-            `--window-size=${config.windowSize.width},${config.windowSize.height}`,
-            ...(config.windowSize.x != null && config.windowSize.y != null
-              ? [`--window-position=${config.windowSize.x},${config.windowSize.y}`]
-              : []),
-          ]
-        : process.platform === 'win32'
-          ? ['--disable-blink-features=AutomationControlled', '--start-maximized']
-          : ['--disable-blink-features=AutomationControlled'],
+    args: (() => {
+      if (config.windowSize) {
+        const pos =
+          config.windowSize.x != null && config.windowSize.y != null
+            ? nextWindowPosition({
+                x: config.windowSize.x,
+                y: config.windowSize.y,
+                width: config.windowSize.width,
+              })
+            : null;
+        return [
+          '--disable-blink-features=AutomationControlled',
+          `--window-size=${config.windowSize.width},${config.windowSize.height}`,
+          ...(pos ? [`--window-position=${pos.x},${pos.y}`] : []),
+        ];
+      }
+      return process.platform === 'win32'
+        ? ['--disable-blink-features=AutomationControlled', '--start-maximized']
+        : ['--disable-blink-features=AutomationControlled'];
+    })(),
     // 去掉 Playwright 默认注入的 --enable-automation（会留下 cdc_ 钩子与 webdriver 标记）
     ignoreDefaultArgs: ['--enable-automation'],
     ...(proxy

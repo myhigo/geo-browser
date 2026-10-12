@@ -86,4 +86,36 @@ async function raiseWindow(browser: Browser, context: BrowserContext, page: Page
   await page.bringToFront().catch(() => {});
 }
 
-export { raiseWindow };
+// ---- 级联开窗：多窗口水平错开，避免完全重叠 ----
+
+let screenW: number | null | undefined;
+/** 主屏宽度：win32 经 PowerShell 查一次并缓存；非 win32/查询失败返回 null（不级联） */
+function primaryScreenWidth(): number | null {
+  if (screenW !== undefined) return screenW;
+  screenW = null;
+  if (process.platform === 'win32') {
+    const r = spawnSyncRetry('powershell.exe', [
+      '-NoProfile',
+      '-Command',
+      'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width',
+    ]);
+    const w = parseInt((r.stdout || '').trim(), 10);
+    if (Number.isFinite(w) && w >= 800) screenW = w;
+  }
+  return screenW;
+}
+
+let cascadeSeq = 0;
+/**
+ * 级联开窗位置：在基准位上水平步进 120px 循环回绕（限制窗口完整落在屏内），垂直保持基准 y。
+ * 屏幕宽度拿不到 → 原样返回基准位（行为与级联前一致）。
+ */
+function nextWindowPosition(base: { x: number; y: number; width: number }): { x: number; y: number } {
+  const sw = primaryScreenWidth();
+  const span = sw ? sw - base.width : 0;
+  if (span <= 0) return { x: base.x, y: base.y };
+  const x = (base.x + 120 * cascadeSeq++) % span;
+  return { x, y: base.y };
+}
+
+export { raiseWindow, nextWindowPosition };
