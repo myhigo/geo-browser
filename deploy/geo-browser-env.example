@@ -33,8 +33,6 @@ GEO_DPS_MIN_TTL_SEC=60
 # 用系统 Chrome（本地版开）；容器版关
 GEO_USE_SYSTEM_CHROME=1
 
-# (平台,IP) 冷却间隔（秒）：同平台同IP两次使用之间的最小间隔
-GEO_PLATFORM_IP_INTERVAL=120
 
 # 账号冷却区间（秒）：账号释放后到下次可被挑选的等待时长，区间内随机取值（也可写单值如 180 固定）
 GEO_ACCOUNT_INTERVAL_SEC=120-300
