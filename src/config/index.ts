@@ -52,6 +52,15 @@ const bool = (k: string, d: boolean): boolean => {
   return v === '1' || v.toLowerCase() === 'true';
 };
 
+/** 账号冷却区间解析：GEO_ACCOUNT_INTERVAL_SEC 支持 "120-300"（区间随机）或 "180"（单值固定） */
+const intervalRange = (k: string, d: string): { min: number; max: number } => {
+  const raw = env(k) ?? d;
+  const m = /^(\d+)\s*-\s*(\d+)$/.exec(raw);
+  if (m) return { min: Number(m[1]), max: Number(m[2]) };
+  const n = num(k, Number(d));
+  return { min: n, max: n };
+};
+
 /** 窗口尺寸配置：GEO_WINDOW=宽,高[,X,Y]。未配置/格式非法 → undefined（走浏览器默认行为） */
 const windowSize = (k: string): { width: number; height: number; x?: number; y?: number } | undefined => {
   const v = env(k);
@@ -118,8 +127,13 @@ export interface AppConfig {
   headless: boolean;
   /** 代理 IP 冷却间隔（秒）：同一 IP 用完后需等待该时长才能再次被分配（默认 120） */
   ipIntervalSec: number;
-  /** (平台,IP) 冷却间隔（秒）：调度 v2 用，同平台同 IP 两次使用之间的最小间隔（默认 120） */
+  /** (平台,IP) 冷却间隔（秒）：真实出口冷却已由账号冷却取代，现仅作 markCooldown 的默认时长 */
   platformIpIntervalSec: number;
+  /** 账号冷却区间（秒）：账号释放后到下次可被挑选的等待时长，区间内随机取值
+   *  （GEO_ACCOUNT_INTERVAL_SEC=120-300 区间随机，或 180 单值固定；默认 120-300） */
+  accountInterval: { min: number; max: number };
+  /** 动态回退直连熔断（秒）：快代理取 IP 失败回退直连后，该平台动态账号暂停派发的时长（默认 600） */
+  dynFallbackSec: number;
   /** 调度扫描间隔（秒）：任务池每多久扫描一次 tryAcquire（默认 10） */
   schedulerTickSec: number;
   /** 浏览器槽位上限：0=自动取启用平台数（默认 0） */
@@ -206,6 +220,8 @@ export const config: AppConfig = {
   headless: bool('GEO_HEADLESS', true),
   ipIntervalSec: num('GEO_IP_INTERVAL', 120),
   platformIpIntervalSec: num('GEO_PLATFORM_IP_INTERVAL', 120),
+  accountInterval: intervalRange('GEO_ACCOUNT_INTERVAL_SEC', '120-300'),
+  dynFallbackSec: num('GEO_DYN_FALLBACK_SEC', 600),
   schedulerTickSec: num('GEO_SCHEDULER_TICK', 10),
   maxSlots: num('GEO_MAX_SLOTS', 0),
   ipLeaseMs: 5 * 60 * 1000,

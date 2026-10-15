@@ -14,6 +14,7 @@ import { resolvePlatform } from '../platforms/index.js';
 import { accountRepo, Account, accountDirOf } from '../storage/accountRepo.js';
 import { proxyRepo, isDirectIp } from '../storage/proxyRepo.js';
 import { paths, config } from '../config/index.js';
+import { err } from '../log.js';
 import { raiseWindow, nextWindowPosition } from '../windowRaise.js';
 
 /** 传给 Playwright 的代理选项（直连/不存在/未启用 → undefined 表示不注入） */
@@ -217,43 +218,36 @@ export async function logoutAccount(platformId: string, accountId: string): Prom
 // ---------- 问答侧：挑号与回写 ----------
 const inFlight = new Set<string>(); // 正在使用的账号（防同号并发）
 
-/** (平台,IP) 冷却表：key = "platform:ip" → 冷却到期时间戳。ip = 实际出口（local 127.0.0.1 / static 代理 host）。
- *  dynamic 正常用每次新取的 DPS IP，不进出口冷却；仅回退直连时走独立键 DYN_FALLBACK，与 local 的 127.0.0.1 分开，
- *  避免本地账号跑完冷却把动态账号一起挡住。 */
+/** (平台,键) 熔断表：key = "platform:键" → 到期时间戳。
+ *  真实出口冷却已由台账字段 nextAvailableAt（账号冷却）取代；现仅存 DYN_FALLBACK 平台熔断（内存态，重启丢失可接受）。 */
 const coolMap = new Map<string, number>();
 const coolKey = (platform: string, ip: string): string => `${platform}:${ip}`;
-/** dynamic 回退直连专用冷却键（与 local 的 127.0.0.1 分离）：读侧 dynamic 只查此键，防连续回退直连（零容忍）。 */
+/** dynamic 回退直连专用熔断键：快代理取 IP 失败回退直连后，暂停该平台所有动态账号派发，防本地 IP 连续裸奔。 */
 const DYN_FALLBACK = 'dyn-fallback';
 
-/** (平台,IP) 是否在冷却中 */
+/** (平台,键) 是否在冷却/熔断中 */
 export function isCooling(platform: string, ip: string): boolean {
   const until = coolMap.get(coolKey(platform, ip));
   return until !== undefined && until > Date.now();
 }
 
-/** (平台,IP) 冷却剩余秒数 */
+/** (平台,键) 冷却剩余秒数 */
 export function cooldownRemainingSec(platform: string, ip: string): number {
   const until = coolMap.get(coolKey(platform, ip));
   if (!until) return 0;
   return Math.max(0, Math.ceil((until - Date.now()) / 1000));
 }
 
-/** 标记 (平台,IP) 进入冷却（账号使用完成后调用） */
-export function markCooldown(platform: string, ip: string): void {
-  coolMap.set(coolKey(platform, ip), Date.now() + config.platformIpIntervalSec * 1000);
+/** 标记 (平台,键) 进入冷却（sec 缺省用 platformIpIntervalSec；DYN_FALLBACK 用 dynFallbackSec） */
+export function markCooldown(platform: string, ip: string, sec?: number): void {
+  coolMap.set(coolKey(platform, ip), Date.now() + (sec ?? config.platformIpIntervalSec) * 1000);
 }
 
-/** 账号读取侧出口（用于读取侧冷却键）：local→127.0.0.1；static→代理 host（未绑/停用/direct 退回 127.0.0.1）；
- *  dynamic→null（实际出口是每次新取 DPS IP，读取侧不查 127.0.0.1，只由 allocateAccount 查 DYN_FALLBACK 防连续回退直连）。 */
-async function egressIpOf(acc: Account): Promise<string | null> {
-  if (acc.ipMode === 'local') return '127.0.0.1';
-  if (acc.ipMode === 'static') {
-    if (acc.proxyId == null) return '127.0.0.1';
-    const ip = await proxyRepo().get(acc.proxyId);
-    if (!ip || ip.enabled === false || isDirectIp(ip)) return '127.0.0.1';
-    return ip.host;
-  }
-  return null; // dynamic：读侧不参与出口冷却
+/** 账号冷却时长（毫秒）：区间 [min,max] 内随机取值，避免固定间隔的机器特征 */
+function accountCooldownMs(): number {
+  const lo = Math.min(config.accountInterval.min, config.accountInterval.max);
+  const hi = Math.max(config.accountInterval.min, config.accountInterval.max);
+  return (lo + Math.random() * (hi - lo)) * 1000;
 }
 
 function isAccountBusy(accountId: string): boolean {
@@ -267,44 +261,41 @@ export interface ReadyCheck {
   dir?: string;
 }
 
-/** 分配一个可用的已登录账号（只挑 active+enabled 且空闲；无可用 → 返回原因） */
+/** 分配一个可用的已登录账号（active+enabled+空闲+已解冻；按 nextAvailableAt 升序取最早可用的；无可用 → 返回原因） */
 export async function allocateAccount(platformId: string): Promise<ReadyCheck> {
   const accounts = await accountRepo().list(platformId);
-  const usable: Account[] = [];
-  let coolingBlocked = 0;
-  let coolingMaxRemain = 0;
+  const candidates: { a: Account; nat: number }[] = [];
+  let coolingCount = 0;
+  let coolingEarliest = Number.MAX_SAFE_INTEGER;
   const coolDetail: string[] = [];
   for (const a of accounts) {
     if (a.status !== 'active' || a.enabled === false || isAccountBusy(a.id) || !fs.existsSync(accountDirOf(a.id))) continue;
-    if (a.ipMode === 'dynamic') {
-      // 动态：读侧不查 127.0.0.1（实际出口是每次新 DPS IP），只查 dynamic-fallback 键防连续回退直连
-      if (isCooling(platformId, DYN_FALLBACK)) {
-        const rem = cooldownRemainingSec(platformId, DYN_FALLBACK);
-        coolingBlocked++;
-        coolingMaxRemain = Math.max(coolingMaxRemain, rem);
-        coolDetail.push(`${a.id}(动态回退冷却剩${rem}s)`);
-        continue;
-      }
-      usable.push(a);
+    // 账号冷却：nextAvailableAt 为 NULL/undefined（从未跑过）归一为 0 → 最优先
+    const nat = a.nextAvailableAt ?? 0;
+    if (nat > Date.now()) {
+      coolingCount++;
+      coolingEarliest = Math.min(coolingEarliest, nat);
+      const rem = Math.ceil((nat - Date.now()) / 1000);
+      coolDetail.push(`${a.id}(冷却剩${rem}s)`);
       continue;
     }
-    const ip = await egressIpOf(a);
-    if (ip && isCooling(platformId, ip)) {
-      const rem = cooldownRemainingSec(platformId, ip);
-      coolingBlocked++;
-      coolingMaxRemain = Math.max(coolingMaxRemain, rem);
-      coolDetail.push(`${a.id}(${ip}剩${rem}s)`);
-      continue; // (平台,IP) 冷却中 → 不可用
+    if (a.ipMode === 'dynamic' && isCooling(platformId, DYN_FALLBACK)) {
+      const rem = cooldownRemainingSec(platformId, DYN_FALLBACK);
+      coolingCount++;
+      coolingEarliest = Math.min(coolingEarliest, Date.now() + rem * 1000);
+      coolDetail.push(`${a.id}(动态回退熔断剩${rem}s)`);
+      continue;
     }
-    usable.push(a);
+    candidates.push({ a, nat });
   }
-  if (usable.length === 0) {
+  if (candidates.length === 0) {
     const label = LOGIN_DRIVERS[platformId]?.label ?? platformId;
-    if (coolingBlocked > 0) {
-      console.log(`[allocate] ${platformId} 0 可用：${coolingBlocked} 个出口冷却中（${coolDetail.join(' / ') || '剩约' + coolingMaxRemain + 's'}）`);
+    if (coolingCount > 0) {
+      const rem = Math.max(0, Math.ceil((coolingEarliest - Date.now()) / 1000));
+      console.log(`[allocate] ${platformId} 0 可用：${coolingCount} 个冷却/熔断中（${coolDetail.join(' / ')}）`);
       return {
         ok: false,
-        reason: `「${label}」${coolingBlocked} 个账号出口冷却中（约剩 ${coolingMaxRemain}s），稍后自动重试`,
+        reason: `「${label}」${coolingCount} 个账号冷却中（最早解冻约 ${rem}s 后），稍后自动重试`,
       };
     }
     const any = accounts.some((a) => ['failed', 'cooling', 'none'].includes(a.status) || a.enabled === false);
@@ -315,20 +306,9 @@ export async function allocateAccount(platformId: string): Promise<ReadyCheck> {
         : `「${label}」未登录任何账号，请先到 /admin 登录`,
     };
   }
-  const now = Date.now();
-  const today = todayStr();
-  // score：最近使用越久越优先、今日查询越少越优先、连续失败惩罚、加抖动
-  const scored = usable
-    .map((a) => ({
-      a,
-      score:
-        (now - (a.lastUsedAt ?? 0)) / 60000
-        - (a.queryDate === today ? (a.todayQueries ?? 0) : 0) * 100
-        - (a.consecutiveFails ?? 0) * 2000
-        + Math.random() * 30,
-    }))
-    .sort((x, y) => y.score - x.score);
-  const pick = scored[0].a;
+  // 按解冻时刻升序：没跑过的最优先 → 其次歇得最久的，公平轮转不反复锤同一账号
+  candidates.sort((x, y) => x.nat - y.nat);
+  const pick = candidates[0].a;
   inFlight.add(pick.id);
   return { ok: true, accountId: pick.id, dir: pick.dir };
 }
@@ -337,27 +317,14 @@ export async function releaseAccount(platformId: string, accountId: string, succ
   inFlight.delete(accountId);
   const acc = await accountRepo().get(platformId, accountId);
   if (!acc) return;
-  // 写侧冷却：
-  //  - dynamic 用成动态 IP（usedDps）→ 不冷却（每次新 IP）；
-  //  - dynamic 回退直连（!usedDps）→ 冷却 127.0.0.1（保护同平台 local 任务，与 local 共用）
-  //    + 冷却 DYN_FALLBACK 键（保护后续 dynamic 任务不再连续回退直连，零容忍）；
-  //  - local/static 按 egressIpOf 原逻辑（local→127.0.0.1；static→代理 host）。
-  if (acc.ipMode === 'dynamic') {
-    if (!usedDps) {
-      markCooldown(platformId, '127.0.0.1');
-      markCooldown(platformId, DYN_FALLBACK);
-      console.log(`[cooldown] ${platformId}/${acc.id} 动态回退直连，冷却 127.0.0.1 + dynamic-fallback（${config.platformIpIntervalSec}s）`);
-    } else {
-      console.log(`[dps] 动态出口账号（${platformId}/${acc.id}）本次使用动态 IP，跳过冷却`);
-    }
-  } else {
-    const coolIp = await egressIpOf(acc);
-    if (coolIp) {
-      markCooldown(platformId, coolIp);
-      console.log(`[cooldown] ${platformId}/${acc.id} 出口 ${coolIp} 冷却（${config.platformIpIntervalSec}s）`);
-    }
+  // 动态回退直连（快代理取 IP 失败）：平台级熔断，暂停该平台动态账号派发，防本地 IP 连续裸奔
+  if (acc.ipMode === 'dynamic' && !usedDps) {
+    markCooldown(platformId, DYN_FALLBACK, config.dynFallbackSec);
+    err(`[cooldown] ${platformId}/${acc.id} 快代理取 IP 失败，回退直连；熔断该平台动态账号 ${config.dynFallbackSec}s`);
   }
-  const patch: Partial<Account> = { lastUsedAt: Date.now() };
+  // 账号冷却：释放即写下次可用时刻（区间随机，成败一律），挑号侧按此过滤+排序
+  const cooldownSec = Math.round(accountCooldownMs() / 1000);
+  const patch: Partial<Account> = { lastUsedAt: Date.now(), nextAvailableAt: Date.now() + cooldownSec * 1000 };
   if (loginRequired) {
     patch.status = 'failed';
     patch.note = '问答时检测到登录墙/会话失效，需重新登录';
@@ -371,6 +338,7 @@ export async function releaseAccount(platformId: string, accountId: string, succ
     patch.queryDate = today;
   }
   await accountRepo().patch(platformId, accountId, patch);
+  console.log(`[cooldown] ${platformId}/${acc.id} 账号冷却 ${cooldownSec}s（解冻时刻已写入台账 nextAvailableAt）`);
 }
 
 // ---------- 登录会话（同一时刻只允许一个平台的一个账号在登） ----------

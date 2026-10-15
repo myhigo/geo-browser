@@ -1,4 +1,4 @@
-// 快代理私密代理：IP 缓存复用。getdps 取 IP，getdpsvalidtime 查各 IP 剩余秒。
+// 快代理私密代理：IP 缓存复用。getdps 取 IP（返回几枚存几枚），getdpsvalidtime 查各 IP 剩余秒。
 // getdps 响应：{ code, msg, data: { proxy_list: ["ip:port"], count } }，code=0 才算成功。
 // getdpsvalidtime 响应：{ code, data: { "ip:port": 剩余秒 } }。账密走配置，不在响应里。
 
@@ -31,7 +31,7 @@ function liveRemaining(p: CachedProxy): number {
   return p.validAt - (Date.now() - p.checkedAt) / 1000;
 }
 
-async function requestOnce(): Promise<ProxyOpts | null> {
+async function requestOnce(): Promise<ProxyOpts[]> {
   const { secretId, secretKey, username, password } = config.dps;
   try {
     const res = await fetch(API, {
@@ -47,24 +47,29 @@ async function requestOnce(): Promise<ProxyOpts | null> {
     });
     if (!res.ok) {
       log(`[dps] HTTP ${res.status}`);
-      return null;
+      return [];
     }
     const j = (await res.json()) as { code?: number; msg?: string; data?: { proxy_list?: string[] } };
     log(`[dps] getdps 响应：${JSON.stringify(j)}`);
     if (j.code !== 0 || !j.data?.proxy_list?.length) {
       log(`[dps] code=${j.code} msg=${j.msg ?? ''}`);
-      return null;
+      return [];
     }
-    const [host, port] = j.data.proxy_list[0].split(':');
-    if (!host || !port) return null;
-    return {
-      server: `http://${host}:${port}`,
-      ...(username ? { username } : {}),
-      ...(password ? { password } : {}),
-    };
+    // 返回几枚存几枚（当前套餐 num=1 只回一枚，代码按多枚通用处理）
+    const opts: ProxyOpts[] = [];
+    for (const entry of j.data.proxy_list) {
+      const [host, port] = entry.split(':');
+      if (!host || !port) continue;
+      opts.push({
+        server: `http://${host}:${port}`,
+        ...(username ? { username } : {}),
+        ...(password ? { password } : {}),
+      });
+    }
+    return opts;
   } catch (e) {
     log(`[dps] 请求异常：${(e as Error).message}`);
-    return null;
+    return [];
   }
 }
 
@@ -98,13 +103,12 @@ async function seed(opts: ProxyOpts[]): Promise<CachedProxy[]> {
 
 /** 取一批新 IP（getdps 一次，失败重试一次）并播种进池 */
 async function refill(): Promise<CachedProxy[]> {
-  const first = await requestOnce();
-  if (!first) {
-    const retry = await requestOnce();
-    if (!retry) return [];
-    return await seed([retry]);
+  let batch = await requestOnce();
+  if (!batch.length) {
+    batch = await requestOnce();
+    if (!batch.length) return [];
   }
-  return await seed([first]);
+  return await seed(batch);
 }
 
 /** 取新一批 IP（并发去重）：已有在途请求则直接复用，不重复打 getdps */
@@ -134,20 +138,19 @@ export async function fetchDpsProxy(forceFresh = false): Promise<ProxyOpts | nul
     for (let i = pool.length - 1; i >= 0; i--) {
       if (liveRemaining(pool[i]) <= 0) pool.splice(i, 1);
     }
-    // 挑剩余最高的可用 IP 复用
-    const usable = pool
-      .filter((p) => liveRemaining(p) > minTtl)
-      .sort((a, b) => liveRemaining(b) - liveRemaining(a));
+    // 池内随机挑一枚剩余 >minTtl 的：均匀分散使用，不总是打剩余最高的那一枚
+    const usable = pool.filter((p) => liveRemaining(p) > minTtl);
     if (usable.length) {
-      log(`🌐 [dps] 复用缓存代理：${usable[0].server}（剩余约 ${Math.round(liveRemaining(usable[0]))}s）`);
-      return usable[0];
+      const pick = usable[Math.floor(Math.random() * usable.length)];
+      log(`🌐 [dps] 复用缓存代理：${pick.server}（剩余约 ${Math.round(liveRemaining(pick))}s，池内可用 ${usable.length} 枚）`);
+      return pick;
     }
   }
 
   // 无可用缓存 → 取新一批（并发去重：同一在途请求只打一次 getdps）
   const fresh = await ensureFresh();
   if (!fresh.length) return null;
-  const pick = fresh.sort((a, b) => liveRemaining(b) - liveRemaining(a))[0];
+  const pick = fresh[Math.floor(Math.random() * fresh.length)];
   log(`🌐 [dps] 新取代理：${pick.server}（剩余约 ${Math.round(liveRemaining(pick))}s）`);
   return pick;
 }

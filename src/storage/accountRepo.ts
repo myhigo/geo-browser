@@ -33,6 +33,8 @@ export interface Account {
   /** 出口模式：local=本地IP直连；static=绑定静态代理(proxy_id)；dynamic=每次采集取快代理动态IP。
    *  必填，默认 local（直连）；不允许 null，需显式选择 static/dynamic */
   ipMode?: 'local' | 'static' | 'dynamic';
+  /** 账号冷却解冻时刻（epoch ms）：释放时写入 now+rand(120-300)s；NULL/未跑过=立即可用（挑号时归一为 0 最优先） */
+  nextAvailableAt?: number | null;
   /** 占用者（instanceId）；null/空 = 空闲。跨重启可据此回收脏占用 */
   leasedBy?: string | null;
 }
@@ -72,6 +74,7 @@ const FIELD_MAP: Record<string, string> = {
   proxyPort: 'proxy_port',
   proxyId: 'proxy_id',
   ipMode: 'ip_mode',
+  nextAvailableAt: 'next_available_at',
   leasedBy: 'leased_by',
 };
 
@@ -87,7 +90,8 @@ const SELECT_COLS = `account_code AS id, remark, nickname, status, note,
   UNIX_TIMESTAMP(last_used_at) * 1000 AS lastUsedAt,
   today_queries AS todayQueries, query_date AS queryDate,
   consecutive_fails AS consecutiveFails,
-  proxy_host AS proxyHost, proxy_port AS proxyPort, proxy_id AS proxyId, ip_mode AS ipMode, leased_by AS leasedBy`;
+  proxy_host AS proxyHost, proxy_port AS proxyPort, proxy_id AS proxyId, ip_mode AS ipMode,
+  UNIX_TIMESTAMP(next_available_at) * 1000 AS nextAvailableAt, leased_by AS leasedBy`;
 
 interface Row extends RowDataPacket {
   id: string;
@@ -105,6 +109,7 @@ interface Row extends RowDataPacket {
   proxyPort?: number | null;
   proxyId?: number | null;
   ipMode?: string;
+  nextAvailableAt?: number | string | null;
   leasedBy?: string | null;
 }
 
@@ -125,12 +130,13 @@ const toAccount = (r: Row): Account => ({
   proxyPort: r.proxyPort ?? undefined,
   proxyId: r.proxyId == null ? undefined : Number(r.proxyId),
   ipMode: (r.ipMode as 'local' | 'static' | 'dynamic') ?? 'local',
+  nextAvailableAt: r.nextAvailableAt == null ? undefined : Number(r.nextAvailableAt),
   leasedBy: r.leasedBy ?? null,
 });
 
-/** 值转换：时间戳→FROM_UNIXTIME、布尔→0/1、其余原样 */
+/** 值转换：时间戳→FROM_UNIXTIME（DATETIME 列）、布尔→0/1、其余原样 */
 const toColumnValue = (key: string, v: unknown): unknown => {
-  if (key === 'createdAt' || key === 'lastUsedAt') {
+  if (key === 'createdAt' || key === 'lastUsedAt' || key === 'nextAvailableAt') {
     return v == null ? null : new Date(v as number);
   }
   if (typeof v === 'boolean') return v ? 1 : 0;

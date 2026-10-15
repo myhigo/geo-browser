@@ -36,6 +36,12 @@ GEO_USE_SYSTEM_CHROME=1
 # (平台,IP) 冷却间隔（秒）：同平台同IP两次使用之间的最小间隔
 GEO_PLATFORM_IP_INTERVAL=120
 
+# 账号冷却区间（秒）：账号释放后到下次可被挑选的等待时长，区间内随机取值（也可写单值如 180 固定）
+GEO_ACCOUNT_INTERVAL_SEC=120-300
+
+# 动态回退直连熔断（秒）：快代理取 IP 失败回退直连后，该平台动态账号暂停派发的时长
+GEO_DYN_FALLBACK_SEC=600
+
 # 调度扫描间隔（秒）：任务池多久扫描一次可执行任务
 GEO_SCHEDULER_TICK=10
 
