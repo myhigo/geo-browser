@@ -8,6 +8,7 @@ import { DOUBAO_CANDIDATE_SELECTORS } from './selectors.js';
 import { firstFound } from '../../diagnostics/elementProbe.js';
 import { elementToText } from '../textExtract.js';
 import { CandidateSelectors, PlatformAdapter, ScreenshotMode, SendState, SourceInfo } from '../../types.js';
+import { CaptchaBlockedError } from '../../errors.js';
 import {
   DOUBAO_INPUT_FOCUS_AFTER,
   DOUBAO_INPUT_FOCUS_SETTLE,
@@ -629,11 +630,11 @@ export class DoubaoAdapter implements PlatformAdapter {
             await this.page.waitForTimeout(1000);
             continue;
           }
-          // 已用尽刷新次数仍卡验证：按本轮失败继续（保留现场，交由上层冷却/重试）
+          // 已用尽刷新次数仍卡验证：本轮任务无法完成，抛异常终止（不抽取、不产结果）
           log(
-            `[${((Date.now() - start) / 1000).toFixed(1)}s] ⚠️ 验证码刷新重发 ${MAX_REFRESH} 次仍未通过，按本轮失败继续（现场已保留）`
+            `[${((Date.now() - start) / 1000).toFixed(1)}s] ⚠️ 验证码刷新重发 ${MAX_REFRESH} 次仍未通过，本轮终止（现场已保留）`
           );
-          break;
+          throw new CaptchaBlockedError(`豆包验证码刷新重发 ${MAX_REFRESH} 次仍未通过`);
         }
       }
 

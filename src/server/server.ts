@@ -3,7 +3,9 @@ import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
 import { runDiagnostic } from '../diagnostics/run.js';
-import { SourceInfo } from '../types.js';
+import { SourceInfo, DiagnosticResult } from '../types.js';
+import { CaptchaBlockedError } from '../errors.js';
+import { appendCollectFail } from '../storage/collectFailLog.js';
 import { PLATFORMS } from '../platforms/index.js';
 import { ENABLED_PLATFORMS, PullConfig, runPullRound } from './pull.js';
 import {
@@ -195,15 +197,30 @@ export async function execute(
     useDynamic = !!a && a.ipMode === 'dynamic';
     collectProxy = useDynamic ? undefined : await proxyOf(platform, ledgerAccountId);
   }
-  let result = await runDiagnostic(keyword, {
-    platform,
-    useSystemChrome: true,
-    userDataDir,
-    headless: !headed,
-    waitLoginMs,
-    proxy: collectProxy,
-    dynamic: useDynamic,
-  });
+  let result: DiagnosticResult;
+  try {
+    result = await runDiagnostic(keyword, {
+      platform,
+      useSystemChrome: true,
+      userDataDir,
+      headless: !headed,
+      waitLoginMs,
+      proxy: collectProxy,
+      dynamic: useDynamic,
+    });
+  } catch (e) {
+    // 本轮任务无法完成（如验证码用尽）：本地留痕失败记录，补释放账号，异常继续上抛（不产结果、不回推）
+    if (e instanceof CaptchaBlockedError) {
+      appendCollectFail({
+        platform,
+        accountId: ledgerAccountId ?? 'anonymous',
+        keyword,
+        reason: 'captcha-exhausted',
+      });
+      if (ledgerAccountId) await releaseAccount(platform, ledgerAccountId, false, false, false);
+    }
+    throw e;
+  }
   if (rotation) await releaseIdentity(platform, result.loginRequired);
   if (ledgerAccountId) {
     await releaseAccount(platform, ledgerAccountId, !!result.answerText && !result.loginRequired, result.loginRequired, result.usedDps);

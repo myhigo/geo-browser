@@ -6,6 +6,7 @@ import { resolvePlatform, PlatformDef } from '../platforms/index.js';
 import { probeElements } from './elementProbe.js';
 import { DiagnosticResult, ElementDiagnosisItem, SourceInfo, ScreenshotMode } from '../types.js';
 import { paths, config } from '../config/index.js';
+import { CaptchaBlockedError } from '../errors.js';
 import { fetchDpsProxy } from '../proxy/dpsProxy.js';
 import { raiseWindow, nextWindowPosition } from '../windowRaise.js';
 
@@ -493,6 +494,8 @@ async function runDiagnosticScoped(
         capturedShots.push('04-finished.png');
       }
     } catch (e) {
+      // 本轮无法完成的失败（如验证码用尽）直接上抛终止，不走抽取
+      if (e instanceof CaptchaBlockedError) throw e;
       notes.push(`⚠️ 交互流程中断（多为元素未定位）：${(e as Error).message}`);
     }
 

@@ -237,6 +237,10 @@ export const paths = {
   get analysisRoot(): string {
     return path.resolve(config.dataRoot, 'analysis');
   },
+  /** 采集失败记录（本轮无法完成、不回推，仅本地留痕） */
+  get collectFailsRoot(): string {
+    return path.resolve(config.dataRoot, 'collect-fails');
+  },
   get siteNamesFile(): string {
     return path.resolve(config.dataRoot, 'site-names.json');
   },

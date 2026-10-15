@@ -185,13 +185,9 @@ export async function runPullRound(
         };
         await reportItems(cfg, [item], onLine, task.platform);
       } catch (e) {
+        // 采集失败不回推（上层「有回推就处理」，失败推上去会污染；等下轮拉词自然重试）
         const errMsg = e instanceof Error ? e.message : String(e);
-        try {
-          await reportItems(cfg, [{ ...base, success: false, answer: null, sourcesText: null, references: [], screenshot: null, msg: errMsg }], onLine, task.platform);
-        } catch (pe) {
-          summary.reportFailed += 1;
-          summary.lastError = `#${task.wordId} ${modelId} 回推失败：${(pe as Error).message}`;
-        }
+        log(`#${task.wordId} ${modelId} 采集失败（不回推，等下轮重试）：${errMsg}`);
       }
     },
     maxSlots,
