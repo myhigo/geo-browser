@@ -34,6 +34,12 @@ GEO_DPS_MIN_TTL_SEC=60
 GEO_USE_SYSTEM_CHROME=1
 
 
+# 导航超时（毫秒）：page.goto 等待上限；走动态代理后页面打开变慢可调大
+GEO_NAV_TIMEOUT_MS=60000
+
+# 回答等待上限（毫秒）：慢代理下元宝 SSE 流极慢，180s 只能攒半截答案，放宽到 300s
+GEO_ANSWER_TIMEOUT_MS=300000
+
 # 账号冷却区间（秒）：账号释放后到下次可被挑选的等待时长，区间内随机取值（也可写单值如 180 固定）
 GEO_ACCOUNT_INTERVAL_SEC=120-300
 
@@ -47,8 +53,9 @@ GEO_SCHEDULER_TICK=10
 GEO_MAX_SLOTS=0
 
 # ===== 代理 bypass（选配）=====
-# 直连、不走代理的域名（逗号分隔）：把静态资源甩给本机带宽，仅对话 API 走代理
-GEO_PROXY_BYPASS="lf-flow-web-cdn.doubao.com,p3-pc.douyinpic.com,p9-pc.douyinpic.com,sf16-va.tiktokcdn.com,fonts.googleapis.com,fonts.gstatic.com"
+# 直连、不走代理的域名（逗号分隔）。2026-10-15 用户定：豆包/字节系 CDN 域已移除，全流量走代理与其他平台一致；
+# 仅保留 Google 字体域（各平台通用静态资源）。若要 100% 全代理，把值清空即可
+GEO_PROXY_BYPASS="fonts.googleapis.com,fonts.gstatic.com"
 
 # ===== MySQL（必填，本项目仅支持数据库存储）=====
 DB_HOST=127.0.0.1
