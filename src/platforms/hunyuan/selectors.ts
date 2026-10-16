@@ -24,9 +24,15 @@ export const YUANBAO_CANDIDATE_SELECTORS: CandidateSelectors = {
     '[class*="send"]',
   ],
   // 回答容器：只取助手气泡（--ai），避免误抓用户问题气泡
+  // 2026-10-15 实测补充：代理慢时 `.agent-chat__bubble--ai` 可能是**空壳**（正文不在其 textContent 内，
+  //   走 speech 层/GPU 加速渲染），故追加两个更可靠的候选——官方属性 [data-conv-speaker="ai"]
+  //   与正文 markdown 节点（.hyc-common-markdown / .hyc-content-md）。消费侧（监控/抽取）取「文本最长」的候选。
   answerContainer: [
     '.agent-chat__bubble--ai',
     '[class*="bubble--ai"]',
+    '[data-conv-speaker="ai"]',
+    '.hyc-common-markdown',
+    '.hyc-content-md',
     '.agent-chat__bubble',
     '[class*="bubble"]',
     '[class*="message"]',

@@ -198,6 +198,78 @@ export class YuanbaoAdapter implements PlatformAdapter {
     return 'unknown';
   }
 
+  /** 本轮 AI 是否「输出中」——元宝官方状态属性 data-conv-outputting（2026-10-15 实测）：
+   *  比类名哈希稳定；必须限定 data-conv-speaker="ai"（实测发送失败时用户条 outputting=true、
+   *  AI 条 false，只看 outputting 会误判）。 */
+  private async aiOutputting(): Promise<boolean> {
+    return this.page
+      .evaluate(() => !!document.querySelector('[data-conv-speaker="ai"][data-conv-outputting="true"]'))
+      .catch(() => false);
+  }
+
+  /** 发送确认（2026-10-15 重写）：**唯一判据 = AI 真的开始输出**（官方属性 data-conv-outputting）。
+   *  ⚠️ 两个假阳性信号必须排除（均实测踩坑）：
+   *    ① 「AI 气泡元素存在」——request abort 时元宝也会立即创建空气泡；
+   *    ② 「发送钮=停止回答」——abort 后按钮同样停在停止态，据此判成功会漏掉刷新重试。
+   *  → 两者都只代表前端 UI 进入生成态，不代表服务端在生成。 */
+  private async confirmSent(waitMs: number): Promise<boolean> {
+    const t0 = Date.now();
+    while (Date.now() - t0 < waitMs) {
+      if (await this.aiOutputting()) return true;
+      await this.page.waitForTimeout(800);
+    }
+    return false;
+  }
+
+  /** 页面可用性恢复（run.ts 在导航后、登录检测前调用；2026-10-15 用户反馈：挂代理启动浏览器
+   *  有时进入登录页、需刷新）。
+   *  ⚠️ 就绪判据必须用「会话页特征元素」（发送钮 / 输入区容器），**不能用 textarea 是否存在**：
+   *     实测登录页上同样有 textarea/contenteditable，用后者会把登录页误判为正常页 → 永不刷新
+   *     （2026-10-15 19:18 实测踩坑）。真登录态失效时刷新救不了 → 放弃，交 checkLogin 判定。 */
+  async recoverPage(): Promise<void> {
+    // 会话页特征：元宝输入区容器或发送钮（登录页不存在）
+    const chatReady = async (): Promise<boolean> => {
+      const l = this.page.locator('#yuanbao-send-btn, [class*="agent-chat__input-box"]').first();
+      return (await l.count().catch(() => 0)) > 0 && (await l.isVisible().catch(() => false));
+    };
+    // 异常页迹象（2026-10-15 用户定：登录页或任何异常页都刷新）：
+    //   URL 命中登录/错误路由，或页面出现登录类、页面级错误类文案。
+    //   会话特征在场时不判异常（waitChat 里 chatReady 优先，双保险防误刷）。
+    const abnormalPage = async (): Promise<boolean> => {
+      if (/login|passport|signin|sso|error/i.test(this.page.url())) return true;
+      return this.page
+        .evaluate(() =>
+          /扫码登录|手机号登录|验证码登录|立即登录|登录\/注册|请先登录|请登录|页面不存在|页面暂时不可用|网页无法访问|网络连接异常|加载失败/.test(
+            document.body ? document.body.innerText : ''
+          )
+        )
+        .catch(() => false);
+    };
+    const waitChat = async (ms: number): Promise<boolean> => {
+      const dl = Date.now() + ms;
+      while (Date.now() < dl) {
+        if (await chatReady()) return true;
+        if (await abnormalPage()) return false;
+        await this.page.waitForTimeout(1000);
+      }
+      return false;
+    };
+    // 阶段1：正常水合 15~20s；给 30s 上限（不打断正在进行的挂载）
+    if (await waitChat(Math.min(config.navTimeoutMs, 30000))) return;
+    // 阶段2：刷新恢复（≤5 轮；登录页/异常页一律刷新）
+    for (let i = 1; i <= 5; i++) {
+      warn(`⚠️ 未进入会话页（登录页/异常页/未加载完）→ 刷新页面恢复（第 ${i}/5 次）`);
+      await this.page
+        .reload({ waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs })
+        .catch(() => {});
+      if (await waitChat(Math.min(config.navTimeoutMs, 45000))) {
+        log('✅ 页面已恢复（会话页就绪）');
+        return;
+      }
+    }
+    warn('⚠️ 刷新 5 次仍未进入会话页（可能登录态已失效），继续后续流程由登录检测判定');
+  }
+
   async checkLogin(): Promise<boolean> {
     const hasInput = await this.page
       .locator('textarea, input, [contenteditable="true"]')
@@ -215,8 +287,45 @@ export class YuanbaoAdapter implements PlatformAdapter {
   //    二次点击即中断回答。故改为：只点一次发送钮，确认标志是「.agent-chat__bubble--ai 出现」，
   //    Enter 仅作为「发送钮未生效」的兜底（且仅一次），绝不重复点钮，杜绝双发中断。
   async sendQuestion(question: string): Promise<void> {
+    // 2026-10-15 重构：限时尝试 + 刷新重来（与豆包同构）。
+    //   背景（实测 + 用户反馈）：挂代理时元宝页面加载不完整/中途整体重载 → 提交可能 request abort；
+    //   且元宝前端会「乐观渲染」空的 AI 气泡，使「气泡存在」式确认把失败误判为已发送。
+    const MAX_REFRESH = 3;
+    for (let round = 0; round <= MAX_REFRESH; round++) {
+      if (round > 0) {
+        warn(`⚠️ 上一轮未确认发送 → 刷新页面重试（第 ${round}/${MAX_REFRESH} 次）`);
+        await this.page
+          .reload({ waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs })
+          .catch(() => {});
+        await this.recoverPage(); // 刷新后可能又是登录页/未加载完
+      }
+      if (await this.attemptSend(question, Date.now() + config.navTimeoutMs)) return;
+    }
+    warn(`⚠️ 刷新重试 ${MAX_REFRESH} 次仍未确认发送，交由回答等待阶段处理`);
+  }
+
+  /** 单轮发送：门1（输入区就绪）→ 聚焦打字 → 门2（发送钮可用）→ 点发送 → 官方状态确认。
+   *  全部等待受 deadline 约束；确认成功返回 true，未确认返回 false（交外层刷新重来）。 */
+  private async attemptSend(question: string, deadline: number): Promise<boolean> {
+    const rem = (): number => Math.max(3000, deadline - Date.now());
+    const sendSel = this.selectors.sendButton.join(', ');
+
+    // 门1：等发送钮元素出现（= 输入区应用已挂载；代理慢时输入框可能先出现但应用还没挂载完）。
+    //   上限 20s（不占满整轮预算）：未出现说明页面不在会话态（登录页/未加载完）→ 立即放弃交外层刷新。
+    const gate1 = await this.page
+      .waitForSelector(sendSel, { timeout: Math.min(rem(), 20000), state: 'visible' })
+      .then(() => true)
+      .catch(() => false);
+    if (!gate1) {
+      warn('⚠️ 门1超时：发送钮未出现（疑似仍在登录页/未挂载完）→ 本轮放弃，交外层刷新重来');
+      return false;
+    }
+
     const input = await firstFound(this.page, this.selectors.input);
-    if (!input) throw new Error('ELEMENT_NOT_FOUND: input');
+    if (!input) {
+      warn('⚠️ 未找到输入框，本轮放弃（交外层刷新重来）');
+      return false;
+    }
 
     await humanClick(this.page, this.selectors.input.join(', ')).catch(() => {});
     await this.page.waitForTimeout(randWaitMs(FOCUS_SETTLE));
@@ -237,11 +346,9 @@ export class YuanbaoAdapter implements PlatformAdapter {
       const ta = this.page.locator('textarea').first();
       await ta.click().catch(() => {});
       await ta.focus().catch(() => {});
+      if (!(await focusedEditable())) await input.locator.focus().catch(() => {});
     }
 
-    if (!(await focusedEditable())) {
-      await input.locator.focus().catch(() => {});
-    }
     await this.page.waitForTimeout(randWaitMs(PRE_TYPE));
     await this.humanType(question);
 
@@ -255,32 +362,47 @@ export class YuanbaoAdapter implements PlatformAdapter {
         .catch(() => '');
     const probe = question.slice(0, Math.max(1, Math.floor(question.length / 2)));
     if (!(await enteredText()).includes(probe)) {
-      warn('⚠️ 输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
+      warn('⚠️ 输入校验失败：问题文本未进入输入框（见 02-question.png）');
     }
 
-    // ① 只点一次发送钮（稳定选择器：#yuanbao-send-btn / a[aria-label="发送"]）
-    const sendSel = this.selectors.sendButton.join(', ');
-    await humanClick(this.page, sendSel);
-    if (await this.waitAnswerStarted(6000)) return; // 助手气泡出现=已发送，立即返回（不二次点）
-
-    // ② 兜底：发送钮未生效时尝试一次 Enter（仅一次，不重复点钮，避免双发中断）
-    await this.page.keyboard.press('Enter').catch(() => {});
-    if (await this.waitAnswerStarted(6000)) return;
-
-    warn('⚠️ 发送未能确认（未见助手回答气泡），请人工检查发送交互');
-  }
-
-  // 发送确认：等待助手气泡（.agent-chat__bubble--ai）出现即视为发送成功。
-  // 区别于旧「输入框清空」判定——元宝发送后保持输入框文本，旧判定会误触发二次点击。
-  private async waitAnswerStarted(timeoutMs = 6000): Promise<boolean> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const ok = await this.page
-        .evaluate(() => !!document.querySelector('.agent-chat__bubble--ai, [class*="bubble--ai"]'))
+    // 门2：等发送钮「可用」（文字进应用状态后按钮才由禁用转可用）。
+    //   代理慢时文字可能已进 DOM 但应用状态未同步 → 此时点击无效（实测 request abort 的诱因之一）。
+    const btnEnabled = (): Promise<boolean> =>
+      this.page
+        .locator('#yuanbao-send-btn')
+        .first()
+        .evaluate((el) => {
+          const e = el as HTMLElement;
+          const dis = e.hasAttribute('disabled') || e.getAttribute('aria-disabled') === 'true';
+          return !dis && !/SendButton_disabled/.test(String(e.className || ''));
+        })
         .catch(() => false);
-      if (ok) return true;
-      await this.page.waitForTimeout(400);
+    if (!(await btnEnabled())) {
+      log('⏳ 发送钮未就绪（应用仍在挂载），等待其可用…');
+      const g2 = Date.now();
+      let ok = false;
+      while (Date.now() < deadline) {
+        if (await btnEnabled()) {
+          ok = true;
+          break;
+        }
+        await this.page.waitForTimeout(1000);
+      }
+      ok
+        ? log(`✅ 发送钮已就绪（等待 ${Math.round((Date.now() - g2) / 1000)}s）`)
+        : warn('⚠️ 发送钮未转可用（超时），仍尝试提交');
     }
+
+    // 提交：点击发送钮（实测点击比 Enter 可靠；Enter 有时完全无反应）
+    await humanClick(this.page, sendSel);
+    if (await this.confirmSent(Math.min(30000, rem()))) return true;
+
+    // 兜底：Enter 一次（不重复点钮，避免双发中断）
+    warn('⚠️ 点发送钮未确认，尝试 Enter 兜底');
+    await this.page.keyboard.press('Enter').catch(() => {});
+    if (await this.confirmSent(Math.min(15000, rem()))) return true;
+
+    warn('⚠️ 本轮发送未确认（未见 AI 输出状态）');
     return false;
   }
 
@@ -352,21 +474,33 @@ export class YuanbaoAdapter implements PlatformAdapter {
 
     // 信号 B：文本长度先增长后稳定的兜底（仅在发送控件非生成态时生效——思考中文本不增长
     //    但仍在输出，不可判完成，2026-10-12 用户提示；unknown 时保持原行为）
-    const textStableDone = (async (): Promise<'text-stable' | 'text-timeout' | 'text-stable-cache'> => {
-      const growthSel = this.selectors.answerContainer.join(', ');
+    const textStableDone = (async (): Promise<
+      'text-stable' | 'text-timeout' | 'text-stable-cache' | 'hung'
+    > => {
+      // 多候选取「文本最长」（2026-10-15 实测）：代理慢时 .agent-chat__bubble--ai 可能是空壳，
+      //   正文只出现在 [data-conv-speaker="ai"] / .hyc-common-markdown 等候选里。
+      //   旧实现「join 后取最后一个」会命中空壳 → 监控恒为 0 字。
+      const growthSels = this.selectors.answerContainer;
       const getAnswerLen = async (): Promise<number | null> =>
         this.page
-          .evaluate((sel) => {
-            const nodes = document.querySelectorAll(sel);
-            const el = nodes.length ? nodes[nodes.length - 1] : null;
-            return el ? (el.textContent || '').length : null;
-          }, growthSel)
+          .evaluate((sels) => {
+            let best = -1;
+            for (const s of sels) {
+              const nodes = document.querySelectorAll(s);
+              if (!nodes.length) continue;
+              const el = nodes[nodes.length - 1];
+              const len = (el.textContent || '').length;
+              if (len > best) best = len;
+            }
+            return best < 0 ? null : best;
+          }, growthSels)
           .catch(() => null);
 
       let lastLen: number | null = null;
       let everGrew = false;
       let noGrowth = 0;
       let lastProgressLog = Date.now();
+      let hungStreak = 0; // 「按钮停在生成态但 AI 无输出」的连续秒数（request abort / 挂死识别）
 
       while (Date.now() - start < timeoutMs) {
         // 元宝澄清卡会中断回答并挂 60s 倒计时：每轮先探测并点【跳过所有】。
@@ -378,8 +512,23 @@ export class YuanbaoAdapter implements PlatformAdapter {
         }
 
         const len = await getAnswerLen();
-        // 发送控件生成态 = 思考/输出中，纯文本兜底一律不得判完成（2026-10-12 用户提示）
+        // 生成中信号（两条，任一成立即不得按文本兜底判完成）：
+        //   ① 发送控件生成态（aria-label=停止回答）；② 官方属性 AI 条 data-conv-outputting="true"
         const st = await this.getSendState();
+        const outputting = await this.aiOutputting();
+        // 挂死识别（2026-10-15 实测）：按钮停在「停止回答」但官方属性显示 AI 根本没在输出——
+        //   request abort 后元宝前端仍把按钮留在停止态，旧逻辑因此一路死等到硬上限（180s）。
+        if (st === 'generating' && !outputting) {
+          hungStreak += 1;
+          if (hungStreak >= 45) {
+            log(
+              `[${((Date.now() - start) / 1000).toFixed(1)}s] ⚠️ 发送控件停在生成态但 AI 无输出 ${hungStreak}s（疑似 request abort/挂死）→ 提前结束本轮`
+            );
+            return 'hung';
+          }
+        } else {
+          hungStreak = 0;
+        }
         if (len !== null) {
           if (lastLen === null) lastLen = len;
           else if (len > lastLen + 2) {
@@ -393,13 +542,13 @@ export class YuanbaoAdapter implements PlatformAdapter {
           noGrowth += 1;
         }
 
-        if (everGrew && noGrowth >= 8 && st !== 'generating') {
+        if (everGrew && noGrowth >= 8 && st !== 'generating' && !outputting) {
           log(
             `[${(Date.now() - start) / 1000}s] 🏁 元宝回答文本连续 8s 无增长（兜底），当前 ${lastLen ?? 0} 字`
           );
           return 'text-stable';
         }
-        if (noGrowth >= 40 && st !== 'generating') {
+        if (noGrowth >= 40 && st !== 'generating' && !outputting) {
           log(
             `[${(Date.now() - start) / 1000}s] 🏁 元宝文本连续 40s 无增长（可能缓存/瞬时答案），当前 ${lastLen ?? 0} 字`
           );
@@ -425,7 +574,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
     );
     // 挂死识别：等待结束时发送控件仍处于生成态（流未断但无输出，疑似风控/服务异常）。
     // 动作栏明确完成退出时不提示——退出瞬间控件可能尚未翻回发送态，属误报（2026-10-12 实测）。
-    if (winner !== 'action-bar' && (await this.getSendState()) === 'generating') {
+    if (winner !== 'action-bar' && winner !== 'hung' && (await this.getSendState()) === 'generating') {
       log('⚠️ 等待结束时发送控件仍处于生成态（疑似挂死/风控），本轮结果可能为空');
     }
     await this.page.waitForTimeout(500);
@@ -437,12 +586,17 @@ export class YuanbaoAdapter implements PlatformAdapter {
       .evaluate((arg: { sels: string[]; src: string }) => {
         const { sels, src } = arg;
         const toText = eval('(' + src + ')') as (n: Node) => string;
+        // 多候选取「文本最长」（2026-10-15 实测）：首个命中的候选可能是空壳气泡（正文在其它候选里）
         let el: Element | null = null;
+        let bestLen = -1;
         for (const s of sels) {
           const nodes = document.querySelectorAll(s);
-          if (nodes.length) {
-            el = nodes[nodes.length - 1];
-            break;
+          if (!nodes.length) continue;
+          const cand = nodes[nodes.length - 1];
+          const len = (cand.textContent || '').length;
+          if (len > bestLen) {
+            bestLen = len;
+            el = cand;
           }
         }
         if (!el) return null;

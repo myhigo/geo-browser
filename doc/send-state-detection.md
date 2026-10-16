@@ -85,3 +85,39 @@
 - `src/platforms/*/​*Adapter.ts`：五平台实现与接入
 - `analysis/sendstate/REPORT.md`：定标原始数据与方法
 - `analysis/sendstate/calibrate.mjs` / `verify-deepseek.mts`：采集与验证脚本
+
+---
+
+## 8. 元宝（hunyuan）挂代理发送失败与页面恢复（2026-10-15）
+
+### 现象
+- 挂动态代理启动浏览器时，元宝有时首屏即登录页，需刷新才能进会话页。
+- 输入问题点发送后偶发 `request abort`：问题气泡留在会话里但 AI 永不回答，发送钮一直停在「停止回答」。
+
+### 实测结论（探针 + 落盘 DOM）
+- abort 轮的 DOM：`.agent-chat__bubble--ai` 是**空壳**（内部只有空的 `.agent-chat__speech-text--box`），
+  用户条 `data-conv-outputting="true"`、AI 条 `--hidden` → 请求未被服务端受理。
+- **两个假阳性信号**（都只代表前端 UI 进入生成态，不代表服务端在生成）：
+  1. 「AI 气泡元素存在」——abort 时元宝也会立刻创建空气泡；
+  2. 「发送钮 aria-label=停止回答」——abort 后按钮同样停在停止态。
+- 旧逻辑同时踩了这两个坑：把 abort 判成「发送成功」→ 不刷新重试；又把它当作「生成中」闸门 → 永不满足 → 死等 180s 硬上限、抽到空答案。
+- 过程监控读不到正文：`.agent-chat__bubble--ai` 的 textContent 长期为空（正文经 speech 层/GPU 加速渲染）→ 进度日志恒为「容器 0 字」。
+
+### 修复
+| 项 | 做法 |
+|---|---|
+| 页面恢复 `recoverPage()` | 就绪判据用**会话页特征**（`#yuanbao-send-btn` / `.agent-chat__input-box` 可见），**不用 textarea**（登录页同样有 textarea → 会把登录页误判为正常页、永不刷新）；**登录页或任何异常页一律刷新**（URL `login/passport/sso/error`，或「扫码登录/页面不存在/网页无法访问/加载失败」等文案）；会话特征在场则不刷新 → **刷新 ≤5 轮** |
+| 发送就绪门 | 门1 等发送钮出现（上限 20s，快速失败交外层刷新）；门2 等发送钮由禁用转可用（`disabled` / `aria-disabled` / `SendButton_disabled`） |
+| 发送确认 `confirmSent()` | **唯一判据 `[data-conv-speaker="ai"][data-conv-outputting="true"]`**（官方状态属性，比哈希类稳定） |
+| 失败重试 | `sendQuestion` = 「限时尝试 + 刷新重来」≤3 轮；单轮确认窗 30s（点击）/ 15s（Enter 兜底） |
+| 过程监控 | 多候选取「文本最长」（追加 `[data-conv-speaker="ai"]`、`.hyc-common-markdown`、`.hyc-content-md`）；兜底闸门加 `!outputting` |
+| 挂死识别 | 按钮停在生成态但 AI 无输出连续 45s → 判 request abort/挂死，提前结束本轮（不再死等硬上限） |
+
+### 验证（真实代理 + 真实账号）
+```
+recoverPage 18s（未进登录页）
+→ sendQuestion 18s：sendState=generating + aiOutputting=true（真确认）
+→ waitForAnswer：📝 回答流式输出中…（容器 976 字）   ← 修复前恒为「容器 0 字」
+→ 15.3s 命中 action-bar → getAnswer 1460 字（内容正常）
+```
+总耗时 67s。abort 场景的刷新重试与 45s 挂死提前退出待自然复现验证。
