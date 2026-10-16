@@ -134,6 +134,10 @@ export interface AppConfig {
   accountInterval: { min: number; max: number };
   /** 动态回退直连熔断（秒）：快代理取 IP 失败回退直连后，该平台动态账号暂停派发的时长（默认 600） */
   dynFallbackSec: number;
+  /** 导航超时（毫秒）：page.goto 的 domcontentloaded 等待上限；走动态代理后页面打开变慢可调大（默认 30000） */
+  navTimeoutMs: number;
+  /** 回答等待上限（毫秒）：waitForAnswer 硬上限；慢代理下元宝 SSE 流极慢，180s 只能攒半截答案（默认 180000） */
+  answerTimeoutMs: number;
   /** 调度扫描间隔（秒）：任务池每多久扫描一次 tryAcquire（默认 10） */
   schedulerTickSec: number;
   /** 浏览器槽位上限：0=自动取启用平台数（默认 0） */
@@ -222,6 +226,8 @@ export const config: AppConfig = {
   platformIpIntervalSec: num('GEO_PLATFORM_IP_INTERVAL', 120),
   accountInterval: intervalRange('GEO_ACCOUNT_INTERVAL_SEC', '120-300'),
   dynFallbackSec: num('GEO_DYN_FALLBACK_SEC', 600),
+  navTimeoutMs: num('GEO_NAV_TIMEOUT_MS', 30000),
+  answerTimeoutMs: num('GEO_ANSWER_TIMEOUT_MS', 180000),
   schedulerTickSec: num('GEO_SCHEDULER_TICK', 10),
   maxSlots: num('GEO_MAX_SLOTS', 0),
   ipLeaseMs: 5 * 60 * 1000,

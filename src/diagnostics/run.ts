@@ -281,7 +281,7 @@ async function runDiagnosticScoped(
       // 迟迟不触发，Playwright 报 net::ERR_TIMED_OUT，但正文往往已渲染。超时只要页面已离开
       // about:blank 空壳（已命中目标域），即视为已加载并继续，避免整轮卡在空白标签。
       try {
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
       } catch (ge) {
         const curUrl = page.url();
         const isBlank = (await page.content().catch(() => '')).trim().length < 60;
@@ -292,7 +292,7 @@ async function runDiagnosticScoped(
           log('⚠️ 导航超时且页面仍空白，等待 3s 重试一次…');
           await page.waitForTimeout(3000);
           await page
-            .goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 })
+            .goto(url, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs * 1.5 })
             .catch(() => {});
           await page.waitForTimeout(2000);
           const curUrl2 = page.url();
@@ -303,6 +303,15 @@ async function runDiagnosticScoped(
           notes.push(`⚠️ 导航首超时但重试成功（${ (ge as Error).message }），页面已渲染，继续后续流程。`);
         } else {
           notes.push(`⚠️ 导航未在 30s 内稳定（${ (ge as Error).message }），但页面已渲染，继续后续流程。`);
+        }
+      }
+      // 平台降级页恢复（可选钩子）：豆包等在服务端限流/会话异常时首屏直接是降级页
+      // （「该页面暂时不可用」+「刷新页面」），输入框永不出现、提交必被拒 → 先自动恢复再往下走。
+      if (adapter.recoverPage) {
+        try {
+          await adapter.recoverPage();
+        } catch (e) {
+          notes.push(`页面恢复钩子异常：${(e as Error).message}`);
         }
       }
       // 等首屏「就绪」再进 checkLogin：① 平台专属输入框（def.selectors.input，已校准平台精确匹配）；
@@ -346,7 +355,7 @@ async function runDiagnosticScoped(
           .catch(() => false);
         if (stillUnlogin) {
           log('👤 水合超时仍处未登录，重新加载页面以重新初始化登录态…');
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs }).catch(() => {});
           await page.waitForTimeout(1500);
           await waitHydrate('重载后水合');
         }
@@ -365,6 +374,18 @@ async function runDiagnosticScoped(
 
     try {
       loginRequired = await adapter.checkLogin();
+      // 走动态代理后 SPA 水合慢：首查时输入框可能尚未渲染 → 误判「需登录」。
+      // 给一个解冻窗口（navTimeoutMs）等输入框出现，出现即视为误判，按已登录继续。
+      if (loginRequired) {
+        const hydratedLate = await page
+          .waitForSelector('textarea, input, [contenteditable="true"]', { timeout: config.navTimeoutMs })
+          .then(() => true)
+          .catch(() => false);
+        if (hydratedLate) {
+          loginRequired = false;
+          log('⚠️ 首查未见输入框（页面水合慢），等待后已出现 → 视为已登录继续');
+        }
+      }
       // 不再用账号昵称探测兜底（2026-09-23 按用户要求简化，不抽取昵称）。
       // 注意取舍：文心等无登录墙平台的 checkLogin 恒 false，无法区分「真登录」与「磁盘无登录态」；
       // 该场景由 confirmLogin 里的会话级 cookie 转持久兜底。
@@ -392,7 +413,7 @@ async function runDiagnosticScoped(
           log('✅ 登录已生效，等待页面稳定后继续诊断');
           // 登录后页面通常会跳转/刷新 → 回到目标聊天页，再补一份「已登录」的 before 现场
           await page.waitForTimeout(2000);
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs }).catch(() => {});
           await page
             .waitForSelector('textarea, input, [contenteditable="true"]', { timeout: 20000 })
             .catch(() => {});
@@ -447,7 +468,7 @@ async function runDiagnosticScoped(
           //    重发是编排职责（只有 run.ts 知道目标 URL 与问题文本），故在此提供；
           //    适配器仍然只负责滑块本身（平台操作私有）。
           const restart = async (): Promise<void> => {
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
             const readySel = [
               ...def.selectors.input,
               'a:has-text("登录")',
@@ -488,7 +509,7 @@ async function runDiagnosticScoped(
       }
 
       // 豆包等无文字级"生成结束"标志的平台：生成中途落盘一份 DOM，用于定标结束标志
-      await adapter.waitForAnswer(180000, dbg ? path.join(root, 'page', 'answering.html') : undefined, question);
+      await adapter.waitForAnswer(config.answerTimeoutMs, dbg ? path.join(root, 'page', 'answering.html') : undefined, question);
       if (dbg) {
         await page.screenshot({ path: path.join(dirS, '04-finished.png') });
         capturedShots.push('04-finished.png');
@@ -507,6 +528,9 @@ async function runDiagnosticScoped(
       } catch (e) {
         notes.push(`抽取回答异常：${(e as Error).message}`);
       }
+      // 拿到真实答案 = 登录态必然有效（匿名路径无输入框可发问）。
+      // 早前慢水合期的 checkLogin 误判在此推翻，避免完整成功结果被「登录态失效」作废。
+      if (answerText) loginRequired = false;
 
       // 关键交付物：真实页面的「问题 + 完整问答」长屏截图。
       // 截图放在「展开信源」之前 → 信源保持折叠态即可，无需为截图特意展开。

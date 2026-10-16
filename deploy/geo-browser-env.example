@@ -34,11 +34,12 @@ GEO_DPS_MIN_TTL_SEC=60
 GEO_USE_SYSTEM_CHROME=1
 
 
-# 导航超时（毫秒）：page.goto 等待上限；走动态代理后页面打开变慢可调大
-GEO_NAV_TIMEOUT_MS=60000
+# 页面就绪等待（毫秒）：goto 导航上限 + 豆包发送双道就绪门（打字前等输入区挂载、打字后等按钮启用）
+GEO_NAV_TIMEOUT_MS=100000
 
 # 回答等待上限（毫秒）：慢代理下元宝 SSE 流极慢，180s 只能攒半截答案，放宽到 300s
 GEO_ANSWER_TIMEOUT_MS=300000
+
 
 # 账号冷却区间（秒）：账号释放后到下次可被挑选的等待时长，区间内随机取值（也可写单值如 180 固定）
 GEO_ACCOUNT_INTERVAL_SEC=120-300

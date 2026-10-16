@@ -30,6 +30,10 @@ export interface CandidateSelectors {
   // ↓ 截图专用锚点，**平台私有**：截图逻辑不共用，故这些锚点也只由对应平台自己解释
   expandRoot?: string[]; // 展开逻辑的内容根（撑开滚动容器的起点）
   questionBlock?: string[]; // 问题业务元素（祖先链 relative 化的起点 + 浮层清理豁免子树 + 诊断对象）
+  // 输入区「完整挂载」标记（可选）：晚于发送钮出现的工具钮（上传/模式等）。
+  // 用途：慢加载/代理下「发送钮已启用」早于「应用可接收消息」，此时提交会被服务端拒收；
+  // 等这些标记出现再发送（2026-10-15 豆包实测「系统异常」根因）。
+  inputAreaReady?: string[];
 }
 
 // 平台适配器统一接口：诊断流程与具体平台解耦。
@@ -38,6 +42,10 @@ export interface CandidateSelectors {
 export interface PlatformAdapter {
   checkLogin(): Promise<boolean>;
   sendQuestion(question: string): Promise<void>;
+  /** 页面可用性恢复（可选钩子）：导航完成后、登录检测之前调用。
+   *  平台在服务端限流/会话异常时会直接渲染降级页（如豆包「该页面暂时不可用」+「刷新页面」），
+   *  此状态下输入框不会出现、提交必被拒 → 由平台自行点击刷新/重载并等页面恢复。 */
+  recoverPage?(): Promise<void>;
   // midDumpPath：可选。生成中途（约 20s 处）把当时 DOM 落盘到该路径，用于定标
   // 「生成中/已结束」的真实标志（豆包无文字级结束标记，靠样本迭代）。
   waitForAnswer(timeoutMs?: number, midDumpPath?: string, question?: string): Promise<void>;
