@@ -6,3 +6,13 @@ export class CaptchaBlockedError extends Error {
     this.name = 'CaptchaBlockedError';
   }
 }
+
+// 发送手势已执行，但在确认窗口内始终没看到页面接受这次提问（输入框仍含原问题、未出现新轮次、
+// 发送控件未进入生成态）。慢链路下的正常失败模式，不是登录问题；本轮无回答可抽取，等下一轮重试。
+// ⚠️ 不自动重发：千问可在手势后数十秒才清空输入框并开始生成，此时重发会造成同会话重复提问。
+export class SendNotConfirmedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SendNotConfirmedError';
+  }
+}

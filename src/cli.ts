@@ -66,6 +66,10 @@ async function main(): Promise<void> {
   let allocated: { platformId: string; accountId: string } | null = null;
   let execDir = userDataDir;
   let execWaitLoginMs = waitLoginMs;
+  // 动态出口：台账账号的 ipMode=dynamic 时，由 runDiagnostic 按「账号↔IP」绑定取出口 IP
+  //（此前 CLI 未传 dynamic，动态账号实际走了直连并误触平台熔断）。
+  let execDynamic = false;
+  let execAccountId: string | undefined;
   if (driver && pfi < 0) {
     const ready = await allocateAccount(platform);
     if (!ready.ok || !ready.accountId || !ready.dir) {
@@ -75,7 +79,9 @@ async function main(): Promise<void> {
     allocated = { platformId: platform, accountId: ready.accountId };
     execDir = ready.dir;
     execWaitLoginMs = 0; // 台账账号应已登录；撞登录墙由归还逻辑标记 failed
-    console.log(`👤 使用台账账号：${ready.accountId}（${ready.dir}）`);
+    execDynamic = ready.ipMode === 'dynamic';
+    execAccountId = ready.accountId;
+    console.log(`👤 使用台账账号：${ready.accountId}（${ready.dir}，出口 ${execDynamic ? '动态IP' : '本地/静态'}）`);
   }
 
   const result = await runDiagnostic(question, {
@@ -86,6 +92,8 @@ async function main(): Promise<void> {
     screenshotMode,
     userDataDir: execDir,
     waitLoginMs: execWaitLoginMs,
+    dynamic: execDynamic,
+    accountId: execAccountId,
   });
   if (allocated) {
     await releaseAccount(

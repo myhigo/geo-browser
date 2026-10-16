@@ -259,6 +259,8 @@ export interface ReadyCheck {
   reason?: string;
   accountId?: string;
   dir?: string;
+  /** 账号出口模式：dynamic 需在开浏览器前按「账号↔IP」绑定取出口 IP（调用方据此决定传 dynamic） */
+  ipMode?: Account['ipMode'];
 }
 
 /** 分配一个可用的已登录账号（active+enabled+空闲+已解冻；按 nextAvailableAt 升序取最早可用的；无可用 → 返回原因） */
@@ -310,7 +312,7 @@ export async function allocateAccount(platformId: string): Promise<ReadyCheck> {
   candidates.sort((x, y) => x.nat - y.nat);
   const pick = candidates[0].a;
   inFlight.add(pick.id);
-  return { ok: true, accountId: pick.id, dir: pick.dir };
+  return { ok: true, accountId: pick.id, dir: pick.dir, ipMode: pick.ipMode };
 }
 
 export async function releaseAccount(platformId: string, accountId: string, success: boolean, loginRequired: boolean, usedDps = false): Promise<void> {

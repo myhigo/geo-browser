@@ -1,19 +1,73 @@
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
-import { log, err, withLogScope } from '../log.js';
+import { log, warn, err, withLogScope } from '../log.js';
 import fs from 'fs';
 import path from 'path';
 import { resolvePlatform, PlatformDef } from '../platforms/index.js';
 import { probeElements } from './elementProbe.js';
 import { DiagnosticResult, ElementDiagnosisItem, SourceInfo, ScreenshotMode } from '../types.js';
 import { paths, config } from '../config/index.js';
-import { CaptchaBlockedError } from '../errors.js';
-import { fetchDpsProxy } from '../proxy/dpsProxy.js';
+import { CaptchaBlockedError, SendNotConfirmedError } from '../errors.js';
+import { acquireIpForAccount, discardIp } from '../proxy/dpsProxy.js';
 import { raiseWindow, nextWindowPosition } from '../windowRaise.js';
+
+// 浏览器拉起串行（2026-10-16 用户定）：一个拉起完成后再拉起下一个，避免同时冲击代理与网络。
+// 并发上限本身由调度器保证（≤ 平台数、同平台严格串行），这里只是把「拉起」这一步排成队列。
+// 排队等待上限 60s：单个拉起卡死时不拖住后续任务（超时即不再排队，退化为并发拉起）。
+let launchQueue: Promise<unknown> = Promise.resolve();
+async function launchSerialized<T>(fn: () => Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const gate = Promise.race([
+    launchQueue.then(() => undefined, () => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, 60_000);
+      timer.unref?.();
+    }),
+  ]);
+  const mine = gate.then(fn);
+  launchQueue = mine.then(() => undefined, () => undefined);
+  try {
+    return await mine;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 function ts(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+}
+
+/**
+ * 代理层故障的错误特征：出口 IP 隧道建不起来 / 被代理拒绝。
+ * 必须与「站点首屏慢」严格区分——前者对同一个 IP 重试毫无意义，只能换 IP。
+ * （2026-10-16 实测：把 ERR_TUNNEL_CONNECTION_FAILED 当成「页面已渲染，继续后续流程」后，
+ *   流程以 ELEMENT_NOT_FOUND 收场，并被上层误报成「登录态失效」，白挂两个正常账号。）
+ */
+const PROXY_ERR_RE =
+  /net::ERR_(?:TUNNEL_CONNECTION_FAILED|PROXY_CONNECTION_FAILED|PROXY_AUTH[A-Z_]*|MANDATORY_PROXY_CONFIGURATION_FAILED|SOCKS[A-Z_]*)/;
+
+/** 出口 IP 不可用（代理层失败）→ 上抛以触发「解散该 IP + 换 IP 重试一次」 */
+class IpUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'IpUnavailableError';
+  }
+}
+
+/**
+ * 当前标签是否为浏览器「网络错误页」（而非站点页面）。
+ * 为什么不能只看 URL 或内容长度：导航失败时 Playwright 仍保留目标 URL，错误页自身的 HTML 也很长
+ * （远超任何「白屏」长度阈值）→ 两者都会把错误页误判成「已渲染」。唯一可靠判据是错误页自身的结构标记。
+ */
+async function isNetErrorPage(page: Page): Promise<boolean> {
+  if (page.url().startsWith('chrome-error://')) return true;
+  return await page
+    .evaluate(() => {
+      if (document.querySelector('#main-frame-error, .neterror')) return true;
+      return (document.body?.className ?? '').includes('neterror');
+    })
+    .catch(() => false);
 }
 
 async function writeReport(root: string, r: DiagnosticResult, label: string): Promise<void> {
@@ -75,8 +129,10 @@ export interface LaunchOpts {
   headless?: boolean;
   /** 代理（真实走代理出口，防风控）：server 形如 http://host:port 或 socks5://host:port */
   proxy?: { server: string; username?: string; password?: string };
-  /** 出口模式=动态（按账号 ipMode 设置）：开浏览器前取快代理新 IP；失败回退到 proxy（静态/直连） */
+  /** 出口模式=动态（按账号 ipMode 设置）：开浏览器前按「账号↔IP」绑定取出口 IP；失败回退到 proxy（静态/直连） */
   dynamic?: boolean;
+  /** 台账账号 id：动态出口靠它复用「账号↔IP」绑定（同一账号在 IP 有效期内走同一出口） */
+  accountId?: string;
 }
 
 export async function runDiagnostic(
@@ -110,18 +166,29 @@ async function runDiagnosticScoped(
   const dbg = config.artifactMode === 'debug';
 
   const headless = opts.headless ?? process.env.GEO_HEADLESS === '1';
-  // 动态出口（按账号 ipMode=dynamic）：开浏览器前取快代理新 IP；取不到回退传入的静态代理/直连。
-  // 不再读全局 config.dps.secretId——是否走动态由账号 ipMode 决定，支持同机混搭。
+  // 动态出口（按账号 ipMode=dynamic）：开浏览器前按「账号↔IP」绑定取得出口 IP——有绑定且未到期即复用，
+  // 到期/无绑定则在本平台配额内并入或新建（见 proxy/dpsProxy.ts）。取不到回退传入的静态代理/直连，
+  // 由账号释放路径记平台熔断，防本地 IP 连续裸奔。
   let proxy = opts.proxy;
   let usedDps = false;
+  // 本次实际使用的动态 IP（用于「确认连不通」时精确解散这一枚，而不是连坐整个池）
+  let dpsServer: string | null = null;
+  // 代理层故障标记：出口 IP 连不通 → 解散该 IP 并换 IP 重试一次（见文件尾部的重试决策）
+  let proxyFailure = false;
+  let proxyFailureReason = '';
   if (opts.dynamic) {
-    const dps = await fetchDpsProxy(retried);
-    if (dps) {
-      proxy = dps;
-      usedDps = true;
-      log(`🌐 [dps] 本次使用动态代理：${dps.server}`);
+    if (!opts.accountId) {
+      warn('⚠️ [ip] 动态出口但调用方未提供账号 id，无法建立「账号↔IP」绑定 → 本轮按静态代理/直连处理');
     } else {
-      log(`⚠️ [dps] 取动态代理失败，回退到${opts.proxy ? '账号静态代理' : '直连'}`);
+      const dps = await acquireIpForAccount(def.id, opts.accountId);
+      if (dps) {
+        proxy = dps;
+        usedDps = true;
+        dpsServer = dps.server;
+        log(`🌐 [dps] 本次使用动态代理：${dps.server}`);
+      } else {
+        log(`⚠️ [dps] 取动态代理失败，回退到${opts.proxy ? '账号静态代理' : '直连'}`);
+      }
     }
   }
   const launchOpts: {
@@ -196,19 +263,21 @@ async function runDiagnosticScoped(
   };
   // 登录态：给了 profile 目录就走持久上下文（登录态落盘，下次复用）；否则仍是临时匿名上下文。
   // ⚠️ 两种模式共用的只有「上下文选项」，浏览器实例与关闭顺序不同，故分开建。
-  let browser: Browser;
-  let context: BrowserContext;
-  if (opts.userDataDir) {
-    context = await chromium.launchPersistentContext(opts.userDataDir, {
-      ...launchOpts,
-      ...contextOpts,
-    });
-    browser = context.browser() as Browser; // 持久上下文自带浏览器实例，关闭时一起关
-    log(`👤 持久登录 profile：${path.resolve(opts.userDataDir)}（首次使用需人工登录一次）`);
-  } else {
-    browser = await chromium.launch(launchOpts);
-    context = await browser.newContext(contextOpts);
-  }
+  // 拉起动作串行（同一时刻只拉起一个浏览器），避免 5 个平台同时拉起冲击代理/网络。
+  const { browser, context } = await launchSerialized(
+    async (): Promise<{ browser: Browser; context: BrowserContext }> => {
+      if (opts.userDataDir) {
+        const ctx = await chromium.launchPersistentContext(opts.userDataDir, {
+          ...launchOpts,
+          ...contextOpts,
+        });
+        log(`👤 持久登录 profile：${path.resolve(opts.userDataDir)}（首次使用需人工登录一次）`);
+        return { browser: ctx.browser() as Browser, context: ctx }; // 持久上下文自带浏览器实例，关闭时一起关
+      }
+      const b = await chromium.launch(launchOpts);
+      return { browser: b, context: await b.newContext(contextOpts) };
+    }
+  );
   // 反自动化指纹脚本：在每一个新文档（含跨域 iframe）最早时机注入，
   // 抹掉 webdriver 标记并补全几处真实桌面浏览器应有的字段，降低阿里等风控的环境判定。
   // ⚠️ 只是"看起来像真人浏览器"，**不破解/不绕过**任何验证码或登录。
@@ -283,6 +352,16 @@ async function runDiagnosticScoped(
       try {
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
       } catch (ge) {
+        const failMsg = (ge as Error).message ?? '';
+        const firstLine = failMsg.split('\n')[0];
+        // ① 代理层故障（出口 IP 隧道建不起来/被代理拒绝）：立即判「IP 不可用」并上抛，
+        //    绝不能走下面的「重试 + 页面已渲染，继续后续流程」——那会把浏览器的网络错误页
+        //    当成正常页面，最终以 ELEMENT_NOT_FOUND 收场并被上层误报成「登录态失效」。
+        if (PROXY_ERR_RE.test(failMsg)) {
+          proxyFailure = true;
+          proxyFailureReason = firstLine;
+          throw new IpUnavailableError(`出口 IP 连不通：${firstLine}`);
+        }
         const curUrl = page.url();
         const isBlank = (await page.content().catch(() => '')).trim().length < 60;
         const targetHost = (() => { try { return new URL(url).hostname; } catch { return ''; } })();
@@ -297,12 +376,26 @@ async function runDiagnosticScoped(
           await page.waitForTimeout(2000);
           const curUrl2 = page.url();
           const blank2 = (await page.content().catch(() => '')).trim().length < 60;
+          // ② 重试后落到浏览器的网络错误页 → 同样按失败处理。URL 与内容长度都判不出来
+          //    （导航失败时 URL 仍是目标站、错误页 HTML 也很长），必须查错误页自身的结构标记；
+          //    否则「重试成功」的假象会继续往下走（2026-10-16 实测就是这么误报的）。
+          if (await isNetErrorPage(page)) {
+            proxyFailure = true;
+            proxyFailureReason = firstLine;
+            throw new IpUnavailableError(`导航落到浏览器网络错误页：${firstLine}`);
+          }
           if (blank2 && !(targetHost && curUrl2.includes(targetHost))) {
             throw ge; // 重试仍白屏 → 保留「打开页面失败」语义
           }
-          notes.push(`⚠️ 导航首超时但重试成功（${ (ge as Error).message }），页面已渲染，继续后续流程。`);
+          notes.push(`⚠️ 导航首超时但重试成功（${failMsg}），页面已渲染，继续后续流程。`);
         } else {
-          notes.push(`⚠️ 导航未在 30s 内稳定（${ (ge as Error).message }），但页面已渲染，继续后续流程。`);
+          // ③ 页面已离开空白且命中目标域，但整页仍可能就是一个错误页（内容长度不可信）→ 仍需排除
+          if (await isNetErrorPage(page)) {
+            proxyFailure = true;
+            proxyFailureReason = firstLine;
+            throw new IpUnavailableError(`导航落到浏览器网络错误页：${firstLine}`);
+          }
+          notes.push(`⚠️ 导航未在 30s 内稳定（${failMsg}），但页面已渲染，继续后续流程。`);
         }
       }
       // 平台降级页恢复（可选钩子）：豆包等在服务端限流/会话异常时首屏直接是降级页
@@ -489,21 +582,27 @@ async function runDiagnosticScoped(
         await page.screenshot({ path: path.join(dirS, '02-question.png') });
         capturedShots.push('02-question.png');
       }
-      // 03 截图前等「回答开始渲染」：元素驱动（回答容器/加载胶囊出现），替代固定 1.5s——
+      // 03 截图前等「回答开始渲染」：元素驱动（平台声明的回答容器 / 加载胶囊出现），替代固定 1.5s——
       // 不同问题思考时间不同，固定时间会不适配。最多轮询 15 次（整体保护）后仍没开始就截现状。
-      for (let i = 0; i < 15; i++) {
-        const started = await page
-          .evaluate(() => {
-            const cap = document.querySelector('[class*="capsule-loading"]');
-            if (cap && (cap as HTMLElement).getBoundingClientRect().width > 0) return true;
-            const core = document.querySelector('.chat-search-answer-generate, .answer-box');
-            return core ? (core.textContent || '').length > 20 : false;
-          })
-          .catch(() => false);
-        if (started) break;
-        await page.waitForTimeout(1000);
-      }
+      // ⚠️ 仅调试模式执行（2026-10-16 修）：这段等待的唯一作用是给下面的 03-answering.png 选时机；
+      //   生产模式（artifactMode=none）不落 01~04 截图，它就成了纯耗时。且原判据写死了文心专属类
+      //   （.chat-search-answer-generate/.answer-box），千问等平台永不命中 → 每轮白等满 15×1s。
+      //   实测（10-16 千问日志）：captcha 结束 → waitForAnswer 开始之间恒为 15s，而 waitForAnswer
+      //   自身只用 2s 就发现「回答早已输出完」——即答案结束后脚本还在空等。
       if (dbg) {
+        const answerReadySel = def.selectors.answerContainer.join(', ');
+        for (let i = 0; i < 15; i++) {
+          const started = await page
+            .evaluate((sel) => {
+              const cap = document.querySelector('[class*="capsule-loading"]');
+              if (cap && (cap as HTMLElement).getBoundingClientRect().width > 0) return true;
+              const core = document.querySelector(sel);
+              return core ? (core.textContent || '').length > 20 : false;
+            }, answerReadySel)
+            .catch(() => false);
+          if (started) break;
+          await page.waitForTimeout(1000);
+        }
         await page.screenshot({ path: path.join(dirS, '03-answering.png') });
         capturedShots.push('03-answering.png');
       }
@@ -517,7 +616,17 @@ async function runDiagnosticScoped(
     } catch (e) {
       // 本轮无法完成的失败（如验证码用尽）直接上抛终止，不走抽取
       if (e instanceof CaptchaBlockedError) throw e;
-      notes.push(`⚠️ 交互流程中断（多为元素未定位）：${(e as Error).message}`);
+      if (e instanceof SendNotConfirmedError) {
+        // 提问未被页面接受（慢链路）→ 如实记一条并跳过后续抽取，**不要**混进「元素未定位」那类文案。
+        //   asked 保持 false：不再白等 waitForAnswer、不再产出「未定位到回答区域」等误导性 note
+        //   （那些 note 会把提交/加载问题带偏成"选择器失效"）。
+        // 走完 sendQuestion 说明输入框已存在且文本已录入 → 不可能是登录墙，清掉可能的慢水合误判，
+        //   避免上层把它报成「登录态失效，请退出登录后重新登录」（2026-10-16 用户要求如实归因）。
+        loginRequired = false;
+        notes.push(`⚠️ 提问未被页面接受：${(e as Error).message}`);
+      } else {
+        notes.push(`⚠️ 交互流程中断（多为元素未定位）：${(e as Error).message}`);
+      }
     }
 
     if (asked) {
@@ -593,6 +702,14 @@ async function runDiagnosticScoped(
       notes.push(`元素诊断异常：${(e as Error).message}`);
     }
 
+    // 出口 IP 中途失效：导航成功、问答途中隧道断掉 → 页面被浏览器替换成网络错误页。
+    // 放在这里覆盖「ask 之后才发现连不通」的场景；只针对没拿到答案的轮次，避免误伤正常结果。
+    if (usedDps && !answerText && !proxyFailure && (await isNetErrorPage(page))) {
+      proxyFailure = true;
+      proxyFailureReason = '页面在流程中被浏览器替换为网络错误页';
+      throw new IpUnavailableError(proxyFailureReason);
+    }
+
     // 阶段3：始终产出报告（即使中途失败也留现场 + 元素诊断）
     result = {
       platform: def.id,
@@ -628,9 +745,19 @@ async function runDiagnosticScoped(
   }
 
   notes.forEach((n) => log(n));
+
+  // 代理层故障优先处理：出口 IP 连不通时「同 IP 重试」毫无意义（那枚 IP 已经死了）。
+  // 先解散它（discardIp）再重试 —— 重试时 acquireIpForAccount 找不到绑定，就会并入/取到新 IP。
+  if (proxyFailure && usedDps && !retried && dpsServer) {
+    await discardIp(dpsServer);
+    log(`⚠️ [dps] 出口 IP 连不通（${proxyFailureReason}）→ 已解散该 IP 的全部绑定，换 IP 重试一次`);
+    return runDiagnosticInner(question, opts, true);
+  }
+
   if (!result) {
     if (usedDps && !retried) {
-      log('⚠️ [dps] 任务未完成，换新 IP 重试一次');
+      // 不换 IP：出口由「账号↔IP」绑定决定，且本轮失败与 IP 无关（页面/网络瞬断）→ 同 IP 重开一次。
+      log('⚠️ [dps] 任务未完成，同 IP 重试一次');
       return runDiagnosticInner(question, opts, true);
     }
     throw new Error(notes.filter((n) => n.includes('❌')).join('；') || '诊断未完成');

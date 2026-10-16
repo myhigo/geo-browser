@@ -14,6 +14,7 @@ import {
   DOUBAO_INPUT_FOCUS_SETTLE,
   DOUBAO_INPUT_PRE_ENTER,
   DOUBAO_INPUT_PRE_TYPE,
+  DOUBAO_INPUT_SETTLE_BEFORE_SEND,
   randWaitMs,
 } from '../../tuning/delays.js';
 
@@ -341,9 +342,10 @@ export class DoubaoAdapter implements PlatformAdapter {
   // 豆包输入区是「textarea + Tiptap contenteditable」双控件：真实编辑器为
   // <div contenteditable="true" class="tiptap ProseMirror">。务必先把焦点真正落到可编辑区，
   // 否则 keyboard.type 会落空（点击可能被拦截 / 光标进了 textarea 镜像）。
-  // 发送入口：单轮尝试（门1 → 打字 → 门2 → 工具钮门 → Enter/重试）限时 config.navTimeoutMs（100s）；
-  // 超时未确认 → 刷新页面重新输入再试，最多 3 次。理由（2026-10-15 用户定）：慢代理下
-  // 半水合的 SPA 里反复重试不如整页重载干净；与验证码「刷新重发」同一套路。
+  // 发送入口：单轮尝试（门1 → 打字 → 门2 → 工具钮门 → Enter/重试），**各等待阶段独立**取
+  // navTimeoutMs(100s)（2026-10-16 用户定，见 attemptSend 注释）；确认失败 → 刷新页面重新输入再试，
+  // 最多 3 次。理由（2026-10-15 用户定）：慢代理下半水合的 SPA 里反复重试不如整页重载干净；
+  // 与验证码「刷新重发」同一套路。
   // 另：豆包服务端限流/会话异常时会渲染降级页（「该页面暂时不可用」+「刷新页面」按钮），
   // 该状态下发消息必被拒（系统异常），故检测到即先点「刷新页面」恢复再继续。
   async sendQuestion(question: string): Promise<void> {
@@ -351,6 +353,26 @@ export class DoubaoAdapter implements PlatformAdapter {
     for (let round = 0; round <= MAX_REFRESH; round++) {
       const unavailable = await this.pageUnavailable();
       if (round > 0) {
+        // 刷新前自检（2026-10-16）：确认判据没抓到、但页面其实已在生成（提问已提交）→ 绝不刷新，
+        //   否则会把正在准备的回答刷掉（用户反馈的「问题发出去了，准备回答的时候又刷新页面」）。
+        if (await this.isGenerating()) {
+          log('🚫 刷新前自检：页面已在生成（提问已提交）→ 放弃刷新，交由回答等待阶段');
+          return;
+        }
+        // 自检②：输入框已不含本轮问题 = 提交已被接受（豆包只在被服务端拒绝时才把文字回填到框里）。
+        //   此判据不依赖流式信号，能覆盖「已受理但回答还没开始」的窗口——正是用户看到的误刷新时刻。
+        const probe = question.slice(0, Math.max(1, Math.floor(question.length / 2)));
+        const leftInBox = await this.page
+          .evaluate(() => {
+            const ce = document.querySelector('[contenteditable="true"]');
+            const ta = document.querySelector('textarea');
+            return ((ce && ce.textContent) || '') + ((ta && (ta as HTMLTextAreaElement).value) || '');
+          })
+          .catch(() => '');
+        if (!leftInBox.includes(probe)) {
+          log('🚫 刷新前自检：输入框已不含本轮问题（提交已被接受）→ 放弃刷新，交由回答等待阶段');
+          return;
+        }
         warn(
           `⚠️ 上一轮 ${Math.round(config.navTimeoutMs / 1000)}s 内未确认发送 → 刷新页面重试（第 ${round}/${MAX_REFRESH} 次）`
         );
@@ -363,7 +385,7 @@ export class DoubaoAdapter implements PlatformAdapter {
         await this.recoverPage();
       }
       await this.dismissPopups();
-      if (await this.attemptSend(question, Date.now() + config.navTimeoutMs)) return;
+      if (await this.attemptSend(question)) return;
     }
     warn(`⚠️ 刷新重试 ${MAX_REFRESH} 次仍未确认发送，交由回答等待阶段处理`);
   }
@@ -428,10 +450,24 @@ export class DoubaoAdapter implements PlatformAdapter {
     return true;
   }
 
+  /** 是否正处于「生成中」（提问已被服务端受理）。只用可靠的生成态信号：
+   *  中断钮在场 / 加载胶囊可见 / 发送控件 aria-busy。用于刷新前自检——避免把已提交的提问刷掉。 */
+  private async isGenerating(): Promise<boolean> {
+    return this.page
+      .evaluate(() => {
+        if (document.querySelector('[data-testid="chat_input_local_break_button"]')) return true;
+        const cap = document.querySelector('[class*="capsule-loading"]');
+        if (cap && (cap as HTMLElement).getBoundingClientRect().width > 0) return true;
+        return !!document.querySelector('[aria-busy="true"]');
+      })
+      .catch(() => false);
+  }
+
   /** 单轮发送尝试：门1（输入区就绪）→ 打字 → 门2（按钮可用）→ 工具钮门 → Enter/有限重试。
-   *  所有等待受 deadline 约束（超时返回 false，由外层刷新页面重来）。 */
-  private async attemptSend(question: string, deadline: number): Promise<boolean> {
-    const rem = (): number => Math.max(2000, deadline - Date.now());
+   *  各等待阶段预算**彼此独立**（2026-10-16 用户定）：输入区就绪、会话区挂载、发送钮就绪、
+   *  提交确认，各自拿满 navTimeoutMs(100s)，互不侵蚀。原实现全用 attemptSend 入口的一个 deadline，
+   *  前置等待把余额吃掉 → 实测点击发送时只剩 16s → 把「已提交但未开始回答」误判成失败并刷新。 */
+  private async attemptSend(question: string): Promise<boolean> {
     const input = await firstFound(this.page, this.selectors.input);
     if (!input) {
       warn('⚠️ 未定位到输入框（页面未就绪）');
@@ -444,7 +480,7 @@ export class DoubaoAdapter implements PlatformAdapter {
     // 可用性由打字后的就绪门（sendEnabled 轮询）承接。
     const sendSel = this.selectors.sendButton.join(', ');
     const inputReady = await this.page
-      .waitForSelector(sendSel, { timeout: Math.min(config.navTimeoutMs, rem()), state: 'visible' })
+      .waitForSelector(sendSel, { timeout: config.navTimeoutMs, state: 'visible' })
       .then(() => true)
       .catch(() => false);
     inputReady
@@ -467,14 +503,18 @@ export class DoubaoAdapter implements PlatformAdapter {
     if ((this.selectors.inputAreaReady?.length ?? 0) > 0 && !(await inputAreaReady())) {
       log('⏳ 会话区晚期标记未出现（应用仍在挂载），等待完整挂载…');
       const areaT0 = Date.now();
+      // 独立预算，不用共享余额（原实现每轮用 rem() 重算 → 上限随余额缩水，日志还谎报 60s）。
+      const areaBudget = config.navTimeoutMs;
       let areaReady = false;
-      while (Date.now() - areaT0 < Math.min(60000, rem())) {
+      while (Date.now() - areaT0 < areaBudget) {
         if (await inputAreaReady()) { areaReady = true; break; }
         await this.page.waitForTimeout(1000);
       }
       areaReady
         ? log(`✅ 会话区完整挂载（等待 ${Math.round((Date.now() - areaT0) / 1000)}s）`)
-        : warn('⚠️ 会话区晚期标记 60s 未出现（可能布局差异），按已就绪继续');
+        : warn(
+            `⚠️ 会话区晚期标记 ${Math.round(areaBudget / 1000)}s 未出现（可能布局差异），按已就绪继续`
+          );
     }
 
 
@@ -505,11 +545,8 @@ export class DoubaoAdapter implements PlatformAdapter {
     if (!(await focusedEditable())) {
       await input.locator.focus().catch(() => {});
     }
-    // 打字前随机停顿 500–2000ms（模拟真人准备输入）
-    await this.page.waitForTimeout(randWaitMs(DOUBAO_INPUT_PRE_TYPE));
-    await this.humanType(question);
 
-    // 校验问题文本是否真的进入输入框（contenteditable 或 textarea 任一含即可）。
+    // 输入框当前文本（contenteditable 或 textarea 任一含即可）。
     // ⚠️ 必须用单个 page.evaluate 一次读完，绝不能用 locator.innerText()/inputValue()：
     // locator 在元素不存在时默认等 30s 超时才抛错（实测两处各卡 30s）。
     const enteredText = async (): Promise<string> =>
@@ -520,10 +557,58 @@ export class DoubaoAdapter implements PlatformAdapter {
           return ((ce && ce.textContent) || '') + ((ta && (ta as HTMLTextAreaElement).value) || '');
         })
         .catch(() => '');
+
+    // 打字前必须空框（2026-10-16 实测定位）：豆包会把未发送文本作为**草稿**持久化，reload 后
+    //   （以及上一轮被拒后）草稿可能被回填 → 此时再打字等于「追加」，DOM 里有文本、应用状态里
+    //   却是旧文本 → 提交被服务端拒收（系统异常）且文字留在框里，后续每一轮都失败。
+    //   清空后「打字 → 发送钮由禁用转可用」即是应用真的吃进了文本的证据（空框时豆包按钮为禁用态）。
+    if ((await enteredText()).trim().length > 0) {
+      warn('⚠️ 输入框非空（疑似草稿回填/上一轮残留）→ 先清空再输入');
+      await input.locator.click().catch(() => {});
+      await this.page.keyboard.press('Control+A').catch(() => {});
+      await this.page.keyboard.press('Delete').catch(() => {});
+      await this.page.waitForTimeout(500);
+      if ((await enteredText()).trim().length > 0) {
+        await this.page.keyboard.press('Control+A').catch(() => {});
+        await this.page.keyboard.press('Backspace').catch(() => {});
+        await this.page.waitForTimeout(500);
+      }
+      log(`🧹 输入框清空结果：${(await enteredText()).trim().length === 0 ? '已空' : '仍非空（继续输入）'}`);
+    }
+
+    // 打字前随机停顿 500–2000ms（模拟真人准备输入）
+    await this.page.waitForTimeout(randWaitMs(DOUBAO_INPUT_PRE_TYPE));
+    await this.humanType(question);
+
+    // 校验问题文本是否真的进入输入框
     const probe = question.slice(0, Math.max(1, Math.floor(question.length / 2)));
     if (!(await enteredText()).includes(probe)) {
       warn('⚠️ 输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
     }
+
+    // 「系统异常」提示的可见数量：用于「本轮新增」判定（存量提示见 submitErrorSeen 注释）。
+    const visibleErrorCount = async (): Promise<number> => {
+      const loc = this.page.locator('text=系统异常');
+      const n = await loc.count().catch(() => 0);
+      let c = 0;
+      for (let i = 0; i < Math.min(n, 10); i++) {
+        if (await loc.nth(i).isVisible().catch(() => false)) c++;
+      }
+      return c;
+    };
+    // 基线**可变**（2026-10-16 修正）：每次提交动作前都重置一次（见 rebaselineErrors）。原实现只在
+    //   发送前取一次 → 首次被拒后气泡若仍在场，之后每次确认都立刻判「本轮新增」，把**其实已提交**的
+    //   重试判成失败 → 放弃/刷新（用户反馈的「出现系统异常后就不再处理提交」由此而来）。
+    let errBaseline = await visibleErrorCount();
+    if (errBaseline > 0) {
+      log(`ℹ️ 发送前页面已有 ${errBaseline} 个可见「系统异常」提示（存量，不计入本轮成败判定）`);
+    }
+    /** 以「当前状态」重置「系统异常」基线（每次提交动作前调用），使「本轮新增」针对最近一次提交 */
+    const rebaselineErrors = async (label: string): Promise<void> => {
+      const n = await visibleErrorCount();
+      if (n !== errBaseline) log(`ℹ️ ${label}：重置「系统异常」基线 ${errBaseline} → ${n}`);
+      errBaseline = n;
+    };
 
     // 发送钮就绪门：走代理后应用挂载慢，文字已进框但按钮仍禁用 → 直接 Enter/点按都无效，
     // 等其恢复后又补点会触发「系统异常/消息排队」。等按钮真正可用（≤navTimeoutMs=100s）再发送。
@@ -552,8 +637,9 @@ export class DoubaoAdapter implements PlatformAdapter {
     if (!(await sendEnabled())) {
       log('⏳ 发送钮未就绪（页面仍在挂载），等待其可用…');
       const gateT0 = Date.now();
+      const gateDeadline = gateT0 + config.navTimeoutMs; // 独立预算，与提交确认窗互不侵蚀
       let ready = false;
-      while (Date.now() < deadline) {
+      while (Date.now() < gateDeadline) {
         if (await sendEnabled()) { ready = true; break; }
         // 输入框已清空 = 内容已被提交（如回车恰好生效），交给后续确认
         if (!(await enteredText()).includes(probe)) break;
@@ -583,15 +669,15 @@ export class DoubaoAdapter implements PlatformAdapter {
     const stillHasInput = (): Promise<boolean> => enteredText().then((t) => t.includes(probe));
 
     // 「系统异常」气泡识别：提交被服务端拒收时出现（问题文字通常被回填到输入框）。
-    // ⚠️ 同样必须判可见性（模板可能常驻 DOM 隐藏态，count() 会误报）。
-    const submitErrorSeen = async (): Promise<boolean> => {
-      const loc = this.page.locator('text=系统异常').first();
-      return (await loc.count().catch(() => 0)) > 0 && (await loc.isVisible().catch(() => false));
-    };
+    // ⚠️ 必须判可见性（模板可能常驻 DOM 隐藏态，count() 会误报）。
+    // ⚠️⚠️ 且必须按**本轮新增**判定（2026-10-16 实测定位）：同一会话里会残留上一轮被拒时的
+    //   「系统异常」提示（重载后仍在 DOM），按「页面上存在」判定会把**其实已提交**的提问误判成
+    //   被拒 → 立即放弃并刷新页面，刷掉正在准备的回答（用户反馈的「问题发出去了又刷新页面」）。
+    const submitErrorSeen = async (): Promise<boolean> => (await visibleErrorCount()) > errBaseline;
 
     // 等待「提交被接受」的证据。⚠️ 豆包陷阱（2026-10-15 实测）：提交失败时先乐观清空输入框、
     // 随后弹「系统异常」并把文字回填 → 「输入框已清空」必须持续 ≥3s 且期间无异常提示才可信。
-    // 出现系统异常或降级页 → 明确判失败（交重试/刷新处理）。
+    // 出现**本轮新增**的「系统异常」或降级页 → 明确判失败（交重试/刷新处理）。
     const waitAnswerStart = async (waitMs: number): Promise<boolean> => {
       const t0 = Date.now();
       let clearedAt = 0;
@@ -609,61 +695,115 @@ export class DoubaoAdapter implements PlatformAdapter {
       return false;
     };
 
-    // 发送与确认：
-    //  ① 主路径 Enter 一次，确认窗口 navTimeoutMs（慢代理下回答开始可能远超 20s，
-    //     窗口过短会把「已发送但未开始」误判成失败 → 补发 → 重复提交，2026-10-15 实测）；
-    //  ② 仅在「文字仍在框」时允许兜底重试，且重试前复核就绪（按钮可用 + 工具钮在场），
-    //     间隔 6s、最多 2 次——系统异常后应用常需数秒才真正可接收消息；
-    //  ③ 文字已清空 / 答案已开始 → 立即停止一切补发。
+    // 发送与确认（2026-10-16 重写）：
+    //  ① 每次提交动作 = 等就绪 → **提交前稳定等待 5s** → 重置「系统异常」基线 → 点击发送钮；
+    //  ② 确认：等「答案开始 / 文字清空并稳定 3s」；出现**本轮新增「系统异常」或降级页**立即判失败；
+    //  ③ 仅「文字仍在框」时重试，间隔 6s、最多 3 次；文字已清空 / 答案已开始 → 立即停止一切补发。
+    //  点击为主（2026-10-15 多轮实测）：人工点击与脚本点击每次成功；Enter 多次出现「死键无反应」
+    //  或「系统异常 + 文字回填」，成功率显著低（网络抓包显示 Enter 对应窗口内并无消息发送请求），
+    //  故重试也统一用点击，不再用 Enter。
     const waitSubmitted = (waitMs: number): Promise<boolean> => waitAnswerStart(waitMs);
-    // 提交方式顺序（2026-10-15 多轮实测）：**点击发送钮为主**——人工点击与脚本点击每次成功；
-    // Enter 多次出现「死键无反应」或「系统异常 + 文字回填」，成功率显著低（网络抓包显示
-    // Enter 对应窗口内并无消息发送请求/无失败请求，即根本没触发提交）。故顺序为：
-    // ① 点击发送钮 → ② Enter → ③④ 间隔后再点击（最多 4 次动作，均由 waitSubmitted 确认）。
+    // 提交确认窗（2026-10-16 用户定）：**打字完成后另起一个独立的 navTimeoutMs(100s) 预算**。
+    //   原实现只有一个 attemptSend 入口的 deadline，被前置「会话区挂载等待 + 发送钮就绪门 +
+    //   逐字打字」吃掉大半——实测点击发送时只剩 16s，回答只要 20s 未开始就被判失败 → 触发刷新重试，
+    //   把正在准备的回答刷掉。此处按约定给足 100s（自打字完成后起算，含提交前稳定等待）。
+    const confirmDeadline = Date.now() + config.navTimeoutMs;
+    const confirmRem = (): number => Math.max(2000, confirmDeadline - Date.now());
+
     let sentConfirmed = false;
 
-    /** 点击发送钮（不可用则不动作） */
-    const clickSend = async (): Promise<void> => {
-      if (!(await sendEnabled())) return;
-      const b = await firstFound(this.page, this.selectors.sendButton);
-      if (b) await b.locator.click().catch(() => {});
-    };
-    /** 敲回车提交 */
-    const pressEnter = async (): Promise<void> => {
-      await this.page.waitForTimeout(randWaitMs(DOUBAO_INPUT_PRE_ENTER));
-      await this.page.keyboard.press('Enter');
+    /** 等「可提交」：发送钮可用 + 输入区已完整挂载（限时，不无限等） */
+    const waitSendReady = async (ms: number): Promise<boolean> => {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) {
+        const ok =
+          (await sendEnabled()) &&
+          ((this.selectors.inputAreaReady?.length ?? 0) === 0 || (await inputAreaReady()));
+        if (ok) return true;
+        await this.page.waitForTimeout(1000);
+      }
+      return false;
     };
 
-    await this.page.waitForTimeout(randWaitMs(DOUBAO_INPUT_PRE_ENTER));
-    await clickSend();
-    if (await waitSubmitted(rem())) sentConfirmed = true;
+    /** 提交后确认：等明确信号（答案开始 / 文字清空并稳定 3s），出现**本轮新增「系统异常」或降级页**
+     *  则立即判失败（交重试）。整窗取 confirmRem()（100s 独立预算）。
+     *  ⚠️ 曾试过「快窗 15s 无信号 + 文字仍在框 → 判未提交、立刻重试」，**实测证伪**（2026-10-16 11:30 轮）：
+     *     点击后文字在框里停留 >16s，脚本据此刻判「未提交」并准备重试，但那次提交其实已被受理——
+     *     框 22s 后才清空、42s 后才开始回答。即「用输入框状态反推没提交」在这条链路上不成立，故撤回该捷径。
+     *     判「被拒」只认可靠的正面证据：本轮新增「系统异常」气泡 / 降级页。 */
+    const confirmSubmitted = (): Promise<boolean> => waitSubmitted(confirmRem());
+
+    /** 点击发送钮。返回是否真的发出了点击（按钮不可用/找不到元素 → false）。
+     *  ⚠️ 必须留痕：此前是静默 `return`，「一次提交都没发起」在日志里完全不可见（2026-10-16 实测）。 */
+    const clickSend = async (): Promise<boolean> => {
+      if (!(await sendEnabled())) {
+        warn('⚠️ 发送钮当前不可用 → 本次未点击');
+        return false;
+      }
+      const b = await firstFound(this.page, this.selectors.sendButton);
+      if (!b) {
+        warn('⚠️ 未定位到发送钮元素 → 本次未点击');
+        return false;
+      }
+      await this.page.waitForTimeout(randWaitMs(DOUBAO_INPUT_PRE_ENTER));
+      try {
+        await b.locator.click({ timeout: 5000 });
+        log('🖱️ 已点击发送钮');
+        return true;
+      } catch (e) {
+        warn(`⚠️ 点击发送钮失败：${(e as Error).message}`);
+        return false;
+      }
+    };
+
+    /** 一次提交动作：等就绪（限时）→ 提交前稳定等待（用户口径 5s）→ 重置异常基线 → 点击。
+     *  稳定等待的依据（2026-10-16 用户反馈 + 日志）：打字刚结束就提交，豆包前端把文本同步进应用
+     *  状态有延迟，过早提交会送出「空/旧内容」被服务端拒收（乐观清空 + 文字回填 + 系统异常）；
+     *  人工等几秒再点发送每次都能过。 */
+    const submitClick = async (label: string): Promise<boolean> => {
+      if (!(await waitSendReady(15000))) {
+        warn(`⚠️ ${label}：等待发送钮可用超时（15s），仍尝试点击`);
+      }
+      if (!(await stillHasInput())) {
+        log(`ℹ️ ${label}：输入框已不含本轮问题（可能已提交）→ 不再点击`);
+        return false;
+      }
+      log(`⏳ ${label}：提交前稳定等待 ${DOUBAO_INPUT_SETTLE_BEFORE_SEND[0] / 1000}s（等应用吃进文本）`);
+      await this.page.waitForTimeout(randWaitMs(DOUBAO_INPUT_SETTLE_BEFORE_SEND));
+      await rebaselineErrors(label);
+      return await clickSend();
+    };
+
+    await submitClick('首次提交');
+    if (await confirmSubmitted()) sentConfirmed = true;
 
     for (let retry = 1; retry <= 3 && !sentConfirmed; retry++) {
-      if (Date.now() >= deadline) break; // 本轮预算用尽 → 交外层刷新重来
+      if (Date.now() >= confirmDeadline) break;
       if (await this.pageUnavailable()) {
         warn('⚠️ 页面降级（该页面暂时不可用）→ 交外层刷新恢复');
         break;
       }
       if (!(await stillHasInput())) {
-        // 文字不在框：可能是「乐观清空」→ 用确认逻辑复核（含 3s 稳定 + 异常/降级检测）
-        sentConfirmed = await waitSubmitted(Math.min(8000, rem()));
+        // 文字不在框（可能在上一次等待期间被提交了）→ 复核确认，不再补发
+        sentConfirmed = await confirmSubmitted();
         break;
       }
       if (await submitErrorSeen()) {
-        warn(`⚠️ 提交被拒（系统异常，文字仍在框）→ 第 ${retry} 次间隔重试`);
+        warn(`⚠️ 提交被拒（本轮新增「系统异常」，文字仍在框）→ 第 ${retry} 次重试`);
       } else {
-        warn(`⚠️ Enter 未被确认（文字仍在框）→ 第 ${retry} 次兜底重试`);
+        warn(`⚠️ 确认窗内未收到提交成功信号（文字仍在框）→ 第 ${retry} 次重试`);
       }
-      await this.page.waitForTimeout(Math.min(6000, rem())); // 给应用恢复时间（系统异常后常需数秒）
+      await this.page.waitForTimeout(Math.min(6000, confirmRem())); // 给应用恢复时间（系统异常后常需数秒）
       if (!(await stillHasInput())) {
-        sentConfirmed = await waitSubmitted(Math.min(8000, rem()));
+        sentConfirmed = await confirmSubmitted();
         break;
       }
-      const canSend = (await sendEnabled()) && ((this.selectors.inputAreaReady?.length ?? 0) === 0 || (await inputAreaReady()));
-      if (!canSend) { warn('⚠️ 重试前复核未就绪（按钮禁用/区未挂载），跳过本次补发'); continue; }
-      if (retry === 1) await pressEnter();
-      else await clickSend();
-      if (await waitSubmitted(Math.min(30000, rem()))) sentConfirmed = true;
+      if (Date.now() >= confirmDeadline) break;
+      // ⚠️ 2026-10-16 修正：原实现在「复核未就绪」时 `continue` 跳过本次重试 —— 三次重试可能全是
+      //   「跳过本次补发」，一次提交都没发起（实测 10:37 轮即是）。现在改为**等就绪后再提交**。
+      //   另外统一用点击（实测点击成功率显著高于 Enter，Enter 常为死键）。
+      await submitClick(`第 ${retry} 次重试`);
+      if (await confirmSubmitted()) sentConfirmed = true;
     }
 
     if (!sentConfirmed) warn('⚠️ 本轮发送未确认（已达确认上限）');

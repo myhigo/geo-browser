@@ -22,13 +22,18 @@ GEO_PULL_DAILY_AT=10:00
 # 往前覆盖的天数：1=昨天，3=前三天（默认 1）
 GEO_PULL_DAYS_BACK=1
 
-# 快代理动态代理：每次开浏览器取一个新 IP。留空=不启用（走账号绑定代理/直连）
+# 快代理动态代理：按「账号 ↔ IP」绑定取出口 IP（同一账号在 IP 有效期内固定走同一出口；
+# IP 到期即解散该 IP 及其全部绑定，账号下次取用时再绑）。留空=不启用（走账号绑定代理/直连）
 GEO_DPS_SECRET_ID=
 GEO_DPS_SECRET_KEY=
 GEO_DPS_USERNAME=
 GEO_DPS_PASSWORD=
-# 复用阈值（秒）：动态代理 IP 剩余有效期低于此值不再复用，默认 60
+# 复用阈值（秒）：IP 剩余有效期低于此值不再使用（按到期处理：解散并取新 IP），默认 60
 GEO_DPS_MIN_TTL_SEC=60
+# 每枚 IP 允许承载的同平台账号数（N）：一个 IP = 5 平台 × N 个账号位。越小越分散（风控更安全）、越费 IP；默认 2
+GEO_DPS_ACCOUNTS_PER_IP=2
+# 同时持有 IP 数上限（默认 5 = 平台数）：达到上限说明配额/清理逻辑有问题，正常不该出现
+GEO_DPS_MAX_IPS=5
 
 # 用系统 Chrome（本地版开）；容器版关
 GEO_USE_SYSTEM_CHROME=1

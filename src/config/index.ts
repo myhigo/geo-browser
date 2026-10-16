@@ -97,6 +97,10 @@ export interface DpsConfig {
   password: string;
   /** 复用阈值（秒）：IP 剩余有效期低于此值不再复用，默认 60 */
   minTtlSec: number;
+  /** 每枚 IP 允许承载的同平台账号数（N，2026-10-16 用户定）：一个 IP = 5 平台 × N 个账号位，默认 2 */
+  accountsPerIp: number;
+  /** 同时持有的 IP 数上限（默认 5 = 平台数）。达到上限说明配额/清理逻辑有问题，正常不该出现 */
+  maxIps: number;
 }
 
 export interface AppConfig {
@@ -117,7 +121,7 @@ export interface AppConfig {
   pullDailyAt: string;
   /** 每日检测往前覆盖的天数：1=昨天，3=前三天 */
   pullDaysBack: number;
-  /** 快代理私密代理：配了 secretId 则每次开浏览器取新 IP */
+  /** 快代理私密代理：配了 secretId 则走动态出口（按「账号↔IP」绑定取 IP，见 proxy/dpsProxy.ts） */
   dps: DpsConfig;
   /** 产物是否落盘 */
   artifactMode: ArtifactMode;
@@ -218,6 +222,8 @@ export const config: AppConfig = {
     username: env('GEO_DPS_USERNAME') ?? '',
     password: env('GEO_DPS_PASSWORD') ?? '',
     minTtlSec: num('GEO_DPS_MIN_TTL_SEC', 60),
+    accountsPerIp: Math.max(1, Math.floor(num('GEO_DPS_ACCOUNTS_PER_IP', 2))),
+    maxIps: Math.max(1, Math.floor(num('GEO_DPS_MAX_IPS', 5))),
   },
   artifactMode: env('GEO_ARTIFACT_MODE') === 'debug' ? 'debug' : 'none',
   windowSize: windowSize('GEO_WINDOW'),

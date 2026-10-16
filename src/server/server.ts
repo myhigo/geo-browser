@@ -188,7 +188,7 @@ export async function execute(
   } else {
     waitLoginMs = headed ? 120_000 : 0; // 登录态平台：有头窗口内等人工登录
   }
-  // 采集出口：按账号 ipMode 决定。static→绑定静态代理；local→直连；dynamic→run.ts 取快代理新 IP。
+  // 采集出口：按账号 ipMode 决定。static→绑定静态代理；local→直连；dynamic→run.ts 按「账号↔IP」绑定取 IP。
   // 登录/测试窗口固定本地 IP（见 loginRegistry），此处仅约束采集出口。
   let collectProxy: Awaited<ReturnType<typeof proxyOf>> | undefined;
   let useDynamic = false;
@@ -207,6 +207,7 @@ export async function execute(
       waitLoginMs,
       proxy: collectProxy,
       dynamic: useDynamic,
+      accountId: ledgerAccountId, // 动态出口按「账号↔IP」绑定复用 IP
     });
   } catch (e) {
     // 本轮任务无法完成（如验证码用尽）：本地留痕失败记录，补释放账号，异常继续上抛（不产结果、不回推）
@@ -816,7 +817,7 @@ app.post('/api/accounts/:platform/:accountId/proxy', async (req, res) => {
 });
 
 // 账号出口模式：local=本地IP直连；static=绑定静态代理；dynamic=每次采集取快代理动态IP。
-// 与代理绑定互不影响：static 用 proxyId；dynamic 忽略 proxyId 每次取新 IP；local 直连。
+// 与代理绑定互不影响：static 用 proxyId；dynamic 忽略 proxyId，按「账号↔IP」绑定走动态出口；local 直连。
 app.post('/api/accounts/:platform/:accountId/ip-mode', async (req, res) => {
   const platform = String(req.params.platform).toLowerCase();
   const accountId = String(req.params.accountId);

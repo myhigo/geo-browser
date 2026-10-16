@@ -66,7 +66,33 @@ export function elementToText(root: Node): string {
   const lines = out.split('\n').map(function (l) {
     return l.replace(/[ \t]+/g, ' ').trim();
   });
-  return lines
+
+  // 行级后处理（2026-10-16 新增）：整行只有列表标记符 → 并入下一行内容，
+  //   即「•\n有赞：…」→「• 有赞：…」，把标记还原成行首前缀。
+  //   动机（元宝实测）：列表标记是独立的 DOM 元素——span.ybc-li-component__dot-wp 为 inline，内含
+  //   `•`（无序）或 `1.`（有序，span.ybc-li-component_dot），而条目正文被包在**块级** div.ybc-p 里；
+  //   结构遍历在标记之后遇到块级元素即换行 → 标记独占一行、正文另起一行（用户反馈「每个换行是一个黑点」）。
+  //   ⚠️ 正则必须在函数内部定义：本函数经 toString() 序列化进浏览器执行，引用外部标识符会 ReferenceError。
+  //   ⚠️ 只匹配「整行仅为标记符」这一种形态：豆包/千问/DeepSeek/文小言的标记是模型直接写在正文里的
+  //     （如「1. 有赞」「✅ 优势：」），永远不落单——四平台生产样本中此类行数均为 0，故本规则对它们
+  //     是 no-op（改动前已用 analysis/answer-text-audit.mts 逐平台比对确认）。
+  const markerOnly = /^(?:[•·‣▪●○◦∙]|\d{1,2}[.、)])$/;
+  const merged: string[] = [];
+  for (let k = 0; k < lines.length; k++) {
+    const cur = lines[k];
+    if (cur !== '' && markerOnly.test(cur)) {
+      let j = k + 1;
+      while (j < lines.length && lines[j] === '') j++; // 跳过标记与正文之间的空行
+      if (j < lines.length) {
+        merged.push(cur + ' ' + lines[j]);
+        k = j; // 标记行与其后的空行一并丢弃
+        continue;
+      }
+    }
+    merged.push(cur);
+  }
+
+  return merged
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();

@@ -8,6 +8,7 @@ import { elementToText } from '../textExtract.js';
 import { humanClick, humanDrag, humanDelay } from '../../diagnostics/human.js';
 import { CandidateSelectors, PlatformAdapter, SendState, SourceInfo, ScreenshotMode } from '../../types.js';
 import { config } from '../../config/index.js';
+import { SendNotConfirmedError } from '../../errors.js';
 import {
   QIANWEN_AD_A_AFTER,
   QIANWEN_AD_A_DETECT_PAUSE,
@@ -29,6 +30,8 @@ import {
   QIANWEN_INPUT_FOCUS_SETTLE,
   QIANWEN_INPUT_PRE_ENTER,
   QIANWEN_INPUT_PRE_TYPE,
+  QIANWEN_SUBMIT_CONFIRM_WINDOW,
+  QIANWEN_SUBMIT_FALLBACK_AT,
   randWaitMs,
 } from '../../tuning/delays.js';
 
@@ -43,6 +46,11 @@ export class QianwenAdapter implements PlatformAdapter {
     private context: BrowserContext,
     private selectors: CandidateSelectors = QIANWEN_CANDIDATE_SELECTORS
   ) {}
+
+  // 提交问题**之前**页面上已有的 `qk-markdown-complete` 标志数（sendQuestion 开头采集）。
+  // 用于 waitForAnswer 判定「本轮新增完成标志」：既避免把上一轮的存量标志误当本轮完成，
+  // 也不受"答案在 waitForAnswer 之前就已输出完"（验证码耗时等）影响。
+  private completeMarksBeforeSend = 0;
 
   // 千问匿名可用（用户确认无需登录）。判定：有输入框 → 匿名可用；否则看有无登录入口。
   // ⚠️ 注意：千问首屏若落在「未进入对话」的壳页（仅有登录入口、暂无输入框），会误判为需登录——
@@ -60,6 +68,13 @@ export class QianwenAdapter implements PlatformAdapter {
   async sendQuestion(question: string): Promise<void> {
     const input = await firstFound(this.page, this.selectors.input);
     if (!input) throw new Error('ELEMENT_NOT_FOUND: input');
+
+    // 采集「提交前」的完成标志数（waitForAnswer 用它判「本轮新增」，见字段注释）。
+    // 必须在按 Enter 之前采集：这样即使答案在 waitForAnswer 开始前就已输出完（验证码耗时等），
+    // 增量判定依然成立；也保证上一轮残留的标志不会让本轮被判提前完成。
+    this.completeMarksBeforeSend = await this.page
+      .evaluate(() => document.querySelectorAll('[class*="qk-markdown-complete"]').length)
+      .catch(() => 0);
 
     // 聚焦可编辑区：先真人式点击（带停顿），再用 .focus() 强制兜底（避免点击被拦截导致失焦）
     await humanClick(this.page, this.selectors.input.join(', ')).catch(() => {});
@@ -105,20 +120,75 @@ export class QianwenAdapter implements PlatformAdapter {
       warn('⚠️ 输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
     }
 
-    // 是否真的发出去：输入框是否已被清空（不再含原问题）
-    const isSent = async (): Promise<boolean> => !(await enteredText()).includes(probe);
+    // 提交确认（2026-10-16 重写）。原实现是「Enter/点发送后**即时**看输入框是否已清空」，只此一条判据；
+    //   慢链路下该判定必然抢跑：实测 13-50-26 轮，手势后 22s（captcha 现场 dump 时刻）问题仍原样躺在
+    //   data-slate-editor 内、无提问气泡、按钮仍是「发送消息」——看起来完全没发出去；而本轮结束前输入框
+    //   被应用自己清空（代码里没有任何清空输入框的动作）⇒ 千问在极慢链路下可在手势后数十秒才吃进请求。
+    //   现改为轮询等待「页面出现任一正向信号」：
+    //     a) 发送控件进入生成态（按钮变「停止回答」）= 应用已受理并开始生成；
+    //     b) 挂上新轮次（chat-round 计数超过发送前基线）；
+    //     c) 输入框已不再含原问题（应用吃进并清空）。
+    //   ⚠️ 不做「未确认就重发」：上述证据说明「输入框仍含原问题」**不能**证明请求没被受理，
+    //     盲目重发会造成同会话重复提问（与豆包第 11/12 节同类风险）。发送钮仅补点一次、且只在
+    //     Enter 于窗口前段完全没生效时才点。
+    const roundsBefore = await this.page
+      .evaluate(() => document.querySelectorAll('[class*="chat-round"]').length)
+      .catch(() => 0);
+    // 返回命中的信号名（null = 都未命中）。打出信号名是为了事后能分清「真命中」与「假阳性」——
+    //   只看「已提交」结论无法判断判据是否可靠（豆包那次踩过同类坑）。
+    const submitSignal = async (): Promise<string | null> => {
+      if ((await this.getSendState()) === 'generating') return '发送控件已进入生成态';
+      const rounds = await this.page
+        .evaluate(() => document.querySelectorAll('[class*="chat-round"]').length)
+        .catch(() => roundsBefore);
+      if (rounds > roundsBefore) return `已挂新轮次（${roundsBefore}→${rounds}）`;
+      if (!(await enteredText()).includes(probe)) return '输入框已清空';
+      return null;
+    };
+    // 轮询至多 givenMs；每 10s 打一条进度（原实现此处静默，排查时只能看到下面的「检索/思考中」，易误读为已在生成）
+    const waitSubmit = async (givenMs: number): Promise<string | null> => {
+      const t0 = Date.now();
+      let lastLog = t0;
+      while (Date.now() - t0 < givenMs) {
+        const why = await submitSignal();
+        if (why) return why;
+        if (Date.now() - lastLog >= 10000) {
+          log(`⏳ 仍在等待页面接受本次提问（已 ${Math.round((Date.now() - t0) / 1000)}s，输入框仍含问题）`);
+          lastLog = Date.now();
+        }
+        await this.page.waitForTimeout(1000);
+      }
+      return submitSignal();
+    };
 
     // 1) 优先 Enter（贴合用户习惯）。发送前随机停顿（真人节奏，不瞬时）
     await humanDelay(...QIANWEN_INPUT_PRE_ENTER);
     await this.page.keyboard.press('Enter');
-    if (await isSent()) return;
 
-    // 2) 兜底：真人式点发送钮
+    // Enter 的确认窗口：正常链路 1~2s 内即出现信号，此时不再补点（原实现无条件再点一次，多一次冗余手势）
+    const whyEnter = await waitSubmit(QIANWEN_SUBMIT_FALLBACK_AT[0]);
+    if (whyEnter) {
+      log(`✅ 提问已被页面接受：${whyEnter}`);
+      return;
+    }
+
+    // 2) 兜底：真人式点发送钮（唯一一次）
     const send = await firstFound(this.page, this.selectors.sendButton);
-    if (send) await humanClick(this.page, this.selectors.sendButton.join(', '));
-    if (await isSent()) return;
+    if (send) {
+      log(`⏳ Enter 后 ${QIANWEN_SUBMIT_FALLBACK_AT[0] / 1000}s 仍未见页面接受 → 补点一次发送钮`);
+      await humanClick(this.page, this.selectors.sendButton.join(', '));
+    }
 
-    warn('⚠️ 发送未能确认（输入框仍含原问题），请人工检查发送交互');
+    // 3) 补点后再等剩余窗口
+    const whyFallback = await waitSubmit(QIANWEN_SUBMIT_CONFIRM_WINDOW[0] - QIANWEN_SUBMIT_FALLBACK_AT[0]);
+    if (whyFallback) {
+      log(`✅ 提问已被页面接受：${whyFallback}`);
+      return;
+    }
+
+    throw new SendNotConfirmedError(
+      `发送手势后 ${QIANWEN_SUBMIT_CONFIRM_WINDOW[0] / 1000}s 未观察到页面接受本次提问（输入框仍含原问题、未出现新轮次）`
+    );
   }
 
   // 模拟真人逐字输入：单字录入，随机间隔 180–450ms；标点后断句长停顿；约 8% 概率随机「思考停顿」。
@@ -146,7 +216,7 @@ export class QianwenAdapter implements PlatformAdapter {
 
   // 等待流式回答完整输出（全元素驱动，无固定分段时间）。
   //   完成信号（权威）：千问回答 markdown 渲染完成后会给根节点加 `qk-markdown-complete` 类
-  //     —— 这是真实「已输出完毕」标志，优先据此判定。
+  //     —— 真实「已输出完毕」标志，**出现即收尾**（2026-10-16：不再额外等文本稳定 2s）。
   //   兜底信号：回答容器文本连续无增长（everGrew 后稳定 / 从未增长但已长时间稳定，应对缓存式瞬时答案）。
   //   ⚠️ 纯文本兜底仅在发送控件非生成态时生效——思考中文本不增长但仍在输出，不可判完成
   //     （2026-10-12 用户提示；getSendState 返回 unknown 时保持原行为，锚点失效不致死等）。
@@ -155,33 +225,60 @@ export class QianwenAdapter implements PlatformAdapter {
   async waitForAnswer(timeoutMs = 180000): Promise<void> {
     const start = Date.now();
 
+    // 正文与完成标志一律读**最新一轮** chat-round 内部：document.querySelector 命中的是文档序第一个，
+    //   多轮会话里那是**最旧**一轮（正文长度与完成标志都会读错）。无 chat-round 锚点时退回整个文档，
+    //   保持旧行为（绝不因锚点缺失而死等）。
+    const ROUND_SEL = '[class*="chat-round"]';
+
     const growthSel = this.selectors.answerContainer.join(', ');
     const getAnswerLen = async (): Promise<number | null> =>
       this.page
-        .evaluate((sel) => {
-          const el = document.querySelector(sel);
-          return el ? (el.textContent || '').length : null;
-        }, growthSel)
+        .evaluate(
+          (arg: { roundSel: string; innerSel: string }) => {
+            const rounds = document.querySelectorAll(arg.roundSel);
+            const scope: ParentNode = rounds.length ? rounds[rounds.length - 1] : document;
+            const el = scope.querySelector(arg.innerSel);
+            return el ? (el.textContent || '').length : null;
+          },
+          { roundSel: ROUND_SEL, innerSel: growthSel }
+        )
         .catch(() => null);
 
     // 千问「完成」标志：回答 markdown 根带上 `qk-markdown-complete`（生成中不带）。
+    //   2026-10-16 两处修正（原实现在下面两行注释里说明）：
+    //     ① 判定范围改「最新一轮」——原 querySelector('[class*="qk-markdown"]') 取文档序第一个，
+    //        多轮会话里那是最旧一轮，本轮的完成标志根本读不到；
+    //     ② 用「完成标志数量 > 提交前基线」判本轮完成，而不是「页面上存在」——官方 class 出现即
+    //        权威「输出完毕」信号，不再白等 noGrowth>=2；用增量则上一轮残留标志不会造成假阳性。
     const isComplete = (): Promise<boolean> =>
       this.page
-        .evaluate(() => {
-          const el = document.querySelector('[class*="qk-markdown"]');
-          return !!el && (el.className || '').includes('qk-markdown-complete');
-        })
+        .evaluate(
+          (arg: { roundSel: string; innerSel: string }) => {
+            const rounds = document.querySelectorAll(arg.roundSel);
+            const scope: ParentNode = rounds.length ? rounds[rounds.length - 1] : document;
+            return !!scope.querySelector(arg.innerSel);
+          },
+          { roundSel: ROUND_SEL, innerSel: '[class*="qk-markdown-complete"]' }
+        )
         .catch(() => false);
+    const completeMarkCount = (): Promise<number> =>
+      this.page
+        .evaluate(() => document.querySelectorAll('[class*="qk-markdown-complete"]').length)
+        .catch(() => 0);
 
     let lastLen: number | null = null;
     let everGrew = false;
     let noGrowth = 0;
     let lastProgressLog = Date.now();
     let endedExplicitly = false; // 官方完成 class 退出（挂死日志不提示）
+    const baseMarks = this.completeMarksBeforeSend; // 提交前存量完成标志数（判「本轮新增」的基线）
 
     while (Date.now() - start < timeoutMs) {
       const len = await getAnswerLen();
-      const complete = await isComplete();
+      // 完成 = 最新一轮出现完成标志 **且** 全页标志数超过提交前基线（排除存量标志假阳性）。
+      // 官方 class 即权威信号；额外的 noGrowth>=1 只用于防「同一轮内分块渐进完成」（前一块先带
+      // complete、正文仍在流式）被误判为整轮结束——流式期间文本持续增长，该条件自然不满足。
+      const complete = (await isComplete()) && (await completeMarkCount()) > baseMarks;
 
       if (len !== null) {
         if (lastLen === null) lastLen = len;
@@ -199,9 +296,9 @@ export class QianwenAdapter implements PlatformAdapter {
       // 发送控件生成态 = 思考/输出中，纯文本兜底一律不得判完成（2026-10-12 用户提示）
       const st = await this.getSendState();
       // 完成判定（任一满足即收尾）：
-      if (complete && noGrowth >= 2) {
+      if (complete && noGrowth >= 1) {
         log(
-          `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 回答完成标志 qk-markdown-complete 出现且文本稳定，当前 ${lastLen ?? 0} 字`
+          `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 回答完成标志 qk-markdown-complete 出现，当前 ${lastLen ?? 0} 字`
         );
         endedExplicitly = true;
         break;
@@ -261,11 +358,56 @@ export class QianwenAdapter implements PlatformAdapter {
         }
         if (!el) return null;
         const clone = el.cloneNode(true) as HTMLElement;
+        // 剔除项（2026-10-16 补）：容器 [class*="answer-common-card"] 自带**表格工具栏**
+        //   div.qk-md-table-action（标题「表格」+ 菜单「下载为表格」「导出为图片」）——UI 文案，
+        //   不是回答内容，不剔除就是掺进正文的三行垃圾。
+        //   ⚠️ 不要再加 [class*="scrollbar"]：表格的滚动容器 quark-scrollbar__viewport 正是 <table>
+        //     的**父节点**，按类名模糊匹配会把整张表一起删掉（实测踩过：表格内容整段消失）。
         clone
           .querySelectorAll(
-            'script, style, noscript, template, iframe, [class*="reference"], [class*="card_video"], [class*="video_note"]'
+            'script, style, noscript, template, iframe, [class*="reference"], [class*="card_video"], [class*="video_note"], [class*="table-action"]'
           )
           .forEach((n) => n.remove());
+
+        // 千问专属预处理（2026-10-16，用户反馈「千问处理后没法看」的两条主因）：
+        //   ① 表格线性化：<td>/<th> 属块级标签 → 不处理会一格一行、行列关系全丢（三列表格拍成 20+ 行
+        //      噪音）。整表替换为一个含换行的文本节点，按「单元格 | 单元格」成行，保住行列可读性。
+        //   ② 列表标记合成：千问的 <ul class="qk-md-ul"><li class="qk-md-li"> 是真列表，但标记由 CSS
+        //      生成（DOM 里根本不存在）→ 纯结构遍历必然取不到 → 列表项与普通正文完全无法区分。
+        //      此处按标签语法补标记（UL→"• "；OL→"1. "），嵌套按层级缩进；条目自身已以标记开头则跳过。
+        clone.querySelectorAll('table').forEach((t) => {
+          const rows: string[] = [];
+          t.querySelectorAll('tr').forEach((tr) => {
+            const cells: string[] = [];
+            tr.querySelectorAll('th, td').forEach((c) => {
+              cells.push((c.textContent || '').replace(/\s+/g, ' ').trim());
+            });
+            if (cells.length) rows.push(cells.join(' | '));
+          });
+          const holder = document.createElement('div');
+          holder.textContent = rows.join('\n');
+          if (t.parentNode) t.parentNode.replaceChild(holder, t);
+        });
+
+        clone.querySelectorAll('li').forEach((li) => {
+          const parent = li.parentElement;
+          const ordered = !!parent && parent.tagName === 'OL';
+          let depth = 0;
+          let p: Element | null = li.parentElement;
+          while (p) {
+            if (p.tagName === 'UL' || p.tagName === 'OL') depth++;
+            p = p.parentElement;
+          }
+          const indent = '  '.repeat(Math.max(0, Math.min(depth - 1, 3)));
+          const own = (li.textContent || '').trim();
+          if (/^[•·‣▪●○◦∙]/.test(own) || /^\d{1,2}[.、)]/.test(own)) return;
+          const n = ordered && parent ? Array.prototype.indexOf.call(parent.children, li) + 1 : 0;
+          li.insertBefore(
+            document.createTextNode(indent + (ordered ? n + '. ' : '• ')),
+            li.firstChild
+          );
+        });
+
         const txt = toText(clone);
         return txt || null;
       }, { sels: this.selectors.answerContainer, src: elementToText.toString() })

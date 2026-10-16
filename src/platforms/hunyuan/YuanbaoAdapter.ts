@@ -606,6 +606,25 @@ export class YuanbaoAdapter implements PlatformAdapter {
             'script, style, noscript, template, iframe, [class*="reference"], [class*="card_video"], [class*="video_note"]'
           )
           .forEach((n) => n.remove());
+
+        // 剔除「纯空白文本节点」（2026-10-16 实测定位）：元宝在块级 </div> 与 </span> 之间留了**字面
+        //   换行文本节点**——原文片段：`…复购型电商。</div>\n</span>`。结构遍历把这个 "\n" 当内容，
+        //   于是每个列表条目尾部多出一个空行（用户反馈「多了一些没用的换行」）。
+        //   实测对应关系：气泡内 `>\n<` 出现 36 次，抽取结果正好 36 个空行 → 一一对应。
+        //   ⚠️ 只在元宝做：豆包/文小言的空行来自真实的块级嵌套（是其可读性来源，用户已认可现状），
+        //     放进通用 elementToText 会把它们压成一堵墙。
+        const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
+        const blanks: Text[] = [];
+        let node = walker.nextNode();
+        while (node) {
+          const t = node.nodeValue || '';
+          if (t.trim() === '' && t.indexOf('\n') >= 0) blanks.push(node as Text);
+          node = walker.nextNode();
+        }
+        blanks.forEach((n) => {
+          if (n.parentNode) n.parentNode.removeChild(n);
+        });
+
         const txt = toText(clone);
         return txt || null;
       }, { sels: this.selectors.answerContainer, src: elementToText.toString() })

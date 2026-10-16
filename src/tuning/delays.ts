@@ -48,6 +48,14 @@ export const QIANWEN_INPUT_FOCUS_AFTER: Delay = [60, 0];
 export const QIANWEN_INPUT_PRE_TYPE: Delay = [500, 1500];
 export const QIANWEN_INPUT_PRE_ENTER: Delay = [500, 500];
 
+// —— 提交确认（2026-10-16 新增） ——
+// 千问「点击提交后请求很久才真正发出」：实测（13-50-26 轮）手势后 22s 问题仍原样躺在输入框内、
+//   无气泡、按钮仍为「发送消息」，而本轮结束前输入框被应用自己清空（代码无清空动作）
+//   ⇒ 慢链路下千问可在手势后数十秒才吃进请求。故提交确认不能即时判，必须给足等待窗口。
+// 取值语义同上（jitter=0 的固定值，用于 page.waitForTimeout/截止时刻，非拟人停顿）。
+export const QIANWEN_SUBMIT_FALLBACK_AT: Delay = [8000, 0]; // Enter 后到此仍无正向信号 → 才补点一次发送钮
+export const QIANWEN_SUBMIT_CONFIRM_WINDOW: Delay = [40000, 0]; // 提交确认总窗口（含上面的补点后等待）
+
 // —— 关闭弹窗：形态 A 居中轮播卡片 ——
 export const QIANWEN_AD_A_DETECT_PAUSE: Delay = [900, 700];
 export const QIANWEN_AD_A_MOVE_DOWN: Delay = [120, 80];
@@ -79,6 +87,10 @@ export const DOUBAO_INPUT_FOCUS_SETTLE: Delay = [120, 120];
 export const DOUBAO_INPUT_FOCUS_AFTER: Delay = [60, 0];
 export const DOUBAO_INPUT_PRE_TYPE: Delay = [500, 1500];
 export const DOUBAO_INPUT_PRE_ENTER: Delay = [500, 500];
+// 提交前稳定等待（2026-10-16 用户定，固定值不随机）：文字已进框、发送钮也已可用，仍再等 5s 才提交。
+//   依据：豆包前端把输入内容同步进应用状态有延迟，打字一结束就提交常被服务端拒收（「系统异常」+
+//   乐观清空 + 文字回填）；用户手工等几秒再点发送则每次都过。这是「等应用就绪」而非拟人停顿，故 jitter=0。
+export const DOUBAO_INPUT_SETTLE_BEFORE_SEND: Delay = [5000, 0];
 
 // ════════════════════════════════════════════════════════════════════
 // DeepSeek（deepseek）
