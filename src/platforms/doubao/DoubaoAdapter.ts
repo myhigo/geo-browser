@@ -2,7 +2,7 @@ import { Page, BrowserContext } from 'playwright';
 import { log, warn } from '../../log.js';
 import fs from 'fs';
 import path from 'node:path';
-import { paths } from '../../config/index.js';
+import { paths, config } from '../../config/index.js';
 import sharp from 'sharp';
 import { DOUBAO_CANDIDATE_SELECTORS } from './selectors.js';
 import { firstFound } from '../../diagnostics/elementProbe.js';
@@ -341,11 +341,142 @@ export class DoubaoAdapter implements PlatformAdapter {
   // 豆包输入区是「textarea + Tiptap contenteditable」双控件：真实编辑器为
   // <div contenteditable="true" class="tiptap ProseMirror">。务必先把焦点真正落到可编辑区，
   // 否则 keyboard.type 会落空（点击可能被拦截 / 光标进了 textarea 镜像）。
+  // 发送入口：单轮尝试（门1 → 打字 → 门2 → 工具钮门 → Enter/重试）限时 config.navTimeoutMs（100s）；
+  // 超时未确认 → 刷新页面重新输入再试，最多 3 次。理由（2026-10-15 用户定）：慢代理下
+  // 半水合的 SPA 里反复重试不如整页重载干净；与验证码「刷新重发」同一套路。
+  // 另：豆包服务端限流/会话异常时会渲染降级页（「该页面暂时不可用」+「刷新页面」按钮），
+  // 该状态下发消息必被拒（系统异常），故检测到即先点「刷新页面」恢复再继续。
   async sendQuestion(question: string): Promise<void> {
-    // 进对话页偶发广告/活动弹窗：不关会挡住输入 → 先检测并关闭
-    await this.dismissPopups();
+    const MAX_REFRESH = 3;
+    for (let round = 0; round <= MAX_REFRESH; round++) {
+      const unavailable = await this.pageUnavailable();
+      if (round > 0) {
+        warn(
+          `⚠️ 上一轮 ${Math.round(config.navTimeoutMs / 1000)}s 内未确认发送 → 刷新页面重试（第 ${round}/${MAX_REFRESH} 次）`
+        );
+        await this.page.reload({ waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs }).catch(() => {});
+        // 刷新后页面可能直接是降级页 → 复用恢复逻辑（点「刷新页面」+ 等输入框），
+        // 否则会对着降级页白等输入框超时（2026-10-15 实测踩到）
+        await this.recoverPage();
+      } else if (unavailable) {
+        warn('⚠️ 打开页面即为降级页（该页面暂时不可用）→ 自动恢复后重试');
+        await this.recoverPage();
+      }
+      await this.dismissPopups();
+      if (await this.attemptSend(question, Date.now() + config.navTimeoutMs)) return;
+    }
+    warn(`⚠️ 刷新重试 ${MAX_REFRESH} 次仍未确认发送，交由回答等待阶段处理`);
+  }
+
+  /** 豆包前端降级页检测：「该页面暂时不可用」文案或「刷新页面」按钮。
+   *  ⚠️ 必须判可见性：SPA 骨架里常驻该降级页模板（隐藏态），count() 会恒 >0 导致误判刷新
+   *  （2026-10-15 实测教训：误点刷新把正在水合的页面反复重启）。 */
+  private async pageUnavailable(): Promise<boolean> {
+    const txt = this.page.locator('text=该页面暂时不可用').first();
+    if ((await txt.count().catch(() => 0)) > 0 && (await txt.isVisible().catch(() => false))) return true;
+    const btn = this.page.locator('button:has-text("刷新页面"), a:has-text("刷新页面")').first();
+    return (await btn.count().catch(() => 0)) > 0 && (await btn.isVisible().catch(() => false));
+  }
+
+  /** 页面可用性恢复（run.ts 在导航后、登录检测前调用，2026-10-15 用户定：此前需人工点刷新）：
+   *  豆包限流/会话异常时「打开网址即直接渲染降级页」（「该页面暂时不可用」+「刷新页面」），
+   *  此状态下输入框永不出现、提交必被拒 → 自动点「刷新页面」（或整页重载）并等输入区恢复；
+   *  仍降级则再刷，最多 3 轮。观察为持续轮询（不依赖单次探测时点）。 */
+  async recoverPage(): Promise<void> {
+    const inputSel = 'textarea, input, [contenteditable="true"]';
+    const inputVisible = async (): Promise<boolean> => {
+      const l = this.page.locator(inputSel).first();
+      return (await l.count().catch(() => 0)) > 0 && (await l.isVisible().catch(() => false));
+    };
+    // 阶段1：持续观察至 navTimeoutMs——输入框出现=正常页；降级页出现=去恢复。
+    // （不能用单次探测：降级页/输入框的出现时刻不定，单次探测会漏掉后出现的降级页，
+    //   导致调用方干等输入框超时、始终不刷新——2026-10-15 用户实测反馈。）
+    const observe = async (ms: number): Promise<'input' | 'degraded' | 'none'> => {
+      const dl = Date.now() + ms;
+      while (Date.now() < dl) {
+        if (await inputVisible()) return 'input';
+        if (await this.pageUnavailable()) return 'degraded';
+        await this.page.waitForTimeout(1000);
+      }
+      return 'none';
+    };
+    let st = await observe(config.navTimeoutMs);
+    if (st !== 'degraded') return; // 正常页或超时无迹象 → 交后续流程
+    // 阶段2：降级页恢复——点平台自带「刷新页面」（可见才点），最多 3 轮
+    for (let i = 1; i <= 3; i++) {
+      warn(`⚠️ 打开页面即为降级页（该页面暂时不可用）→ 自动刷新恢复（第 ${i}/3 次）`);
+      const clicked = await this.clickRefreshIfPresent();
+      if (!clicked) {
+        await this.page.reload({ waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs }).catch(() => {});
+      }
+      st = await observe(30000);
+      if (st === 'input') {
+        log('✅ 降级页已恢复（输入框已出现）');
+        return;
+      }
+      if (st === 'none') return; // 既无输入框也无降级迹象 → 交后续流程判断
+    }
+    warn('⚠️ 降级页仍未恢复（已刷新 3 次），继续后续流程（可能失败）');
+  }
+
+  /** 点平台自带的「刷新页面」按钮；**必须可见**，否则返回 false（调用方退回整页 reload） */
+  private async clickRefreshIfPresent(): Promise<boolean> {
+    const btn = this.page.locator('button:has-text("刷新页面"), a:has-text("刷新页面")').first();
+    if ((await btn.count().catch(() => 0)) === 0) return false;
+    if (!(await btn.isVisible().catch(() => false))) return false;
+    await btn.click({ timeout: 5000 }).catch(() => {});
+    return true;
+  }
+
+  /** 单轮发送尝试：门1（输入区就绪）→ 打字 → 门2（按钮可用）→ 工具钮门 → Enter/有限重试。
+   *  所有等待受 deadline 约束（超时返回 false，由外层刷新页面重来）。 */
+  private async attemptSend(question: string, deadline: number): Promise<boolean> {
+    const rem = (): number => Math.max(2000, deadline - Date.now());
     const input = await firstFound(this.page, this.selectors.input);
-    if (!input) throw new Error('ELEMENT_NOT_FOUND: input');
+    if (!input) {
+      warn('⚠️ 未定位到输入框（页面未就绪）');
+      return false;
+    }
+
+    // 打字前就绪门：走代理后 DOM 先渲染、应用后挂载，此时打字/发送都会落空。
+    // 等发送钮元素真正出现（= 输入区应用挂载完成）再开始输入。
+    // 注意空输入时发送钮是禁用态（「可用」要等文字进框），故此处只等元素在场，
+    // 可用性由打字后的就绪门（sendEnabled 轮询）承接。
+    const sendSel = this.selectors.sendButton.join(', ');
+    const inputReady = await this.page
+      .waitForSelector(sendSel, { timeout: Math.min(config.navTimeoutMs, rem()), state: 'visible' })
+      .then(() => true)
+      .catch(() => false);
+    inputReady
+      ? log('✅ 输入区就绪（发送钮已渲染）')
+      : warn('⚠️ 等待输入区就绪超时，仍尝试输入');
+
+    // ⚠️ 顺序关键（2026-10-15 实测）：必须「等会话区真正挂载完成后再打字」。
+    // 此前顺序是「先打字、后等挂载」→ 文字落进尚未挂载的编辑器（DOM 有、应用状态无），
+    // 导致前 1~2 次 Enter 无效/被拒（系统异常）。改为挂载完成后再输入，文字才进应用状态。
+    // 会话区「真正挂载」软等待（2026-10-15 DOM diff 实测）：门齐（按钮可用+上传钮在场）时页面
+    // 仍处引导页状态，会话组件 30~35s 后才挂载；此前 Enter 是死键或被拒（系统异常）。
+    // 等晚期标记（模式选择器/技能栏/文件输入）出现，上限 60s；超时不阻断（防布局差异死等）。
+    const inputAreaReady = async (): Promise<boolean> => {
+      for (const sel of this.selectors.inputAreaReady ?? []) {
+        const l = this.page.locator(sel).first();
+        if ((await l.count().catch(() => 0)) > 0 && (await l.isVisible().catch(() => false))) return true;
+      }
+      return false;
+    };
+    if ((this.selectors.inputAreaReady?.length ?? 0) > 0 && !(await inputAreaReady())) {
+      log('⏳ 会话区晚期标记未出现（应用仍在挂载），等待完整挂载…');
+      const areaT0 = Date.now();
+      let areaReady = false;
+      while (Date.now() - areaT0 < Math.min(60000, rem())) {
+        if (await inputAreaReady()) { areaReady = true; break; }
+        await this.page.waitForTimeout(1000);
+      }
+      areaReady
+        ? log(`✅ 会话区完整挂载（等待 ${Math.round((Date.now() - areaT0) / 1000)}s）`)
+        : warn('⚠️ 会话区晚期标记 60s 未出现（可能布局差异），按已就绪继续');
+    }
+
 
     // 聚焦可编辑区：先点击，再用 .focus() 强制兜底（避免点击被拦截导致失焦）
     await input.locator.click().catch(() => {});
@@ -394,6 +525,45 @@ export class DoubaoAdapter implements PlatformAdapter {
       warn('⚠️ 输入校验失败：问题文本未进入输入框，请人工检查（见 02-question.png）');
     }
 
+    // 发送钮就绪门：走代理后应用挂载慢，文字已进框但按钮仍禁用 → 直接 Enter/点按都无效，
+    // 等其恢复后又补点会触发「系统异常/消息排队」。等按钮真正可用（≤navTimeoutMs=100s）再发送。
+    // ⚠️ 用 Playwright 原生 API 判定（不建议 page.evaluate + querySelectorAll：候选里若有
+    //    Playwright 专属语法会抛 SyntaxError 并被 catch 静默吞掉，2026-10-15 实测踩坑）。
+    //    按优先级取「第一个命中的候选」，其内存在未禁用且可见的元素才算可用——
+    //    避免被同区其他圆钮（如上传钮）误判为发送钮可用。
+    const sendEnabled = async (): Promise<boolean> => {
+      for (const sel of this.selectors.sendButton) {
+        const loc = this.page.locator(sel);
+        const n = await loc.count().catch(() => 0);
+        if (!n) continue;
+        for (let i = 0; i < Math.min(n, 3); i++) {
+          const el = loc.nth(i);
+          const [dis, aria, vis] = await Promise.all([
+            el.isDisabled().catch(() => true),
+            el.getAttribute('aria-disabled').catch(() => null),
+            el.isVisible().catch(() => false),
+          ]);
+          if (!dis && aria !== 'true' && vis) return true;
+        }
+        return false;
+      }
+      return false;
+    };
+    if (!(await sendEnabled())) {
+      log('⏳ 发送钮未就绪（页面仍在挂载），等待其可用…');
+      const gateT0 = Date.now();
+      let ready = false;
+      while (Date.now() < deadline) {
+        if (await sendEnabled()) { ready = true; break; }
+        // 输入框已清空 = 内容已被提交（如回车恰好生效），交给后续确认
+        if (!(await enteredText()).includes(probe)) break;
+        await this.page.waitForTimeout(1000);
+      }
+      ready
+        ? log(`✅ 发送钮已就绪（等待 ${Math.round((Date.now() - gateT0) / 1000)}s）`)
+        : warn('⚠️ 发送钮等待超时，按原流程尝试发送');
+    }
+
     // 回答已开始信号：发送控件进入生成态（aria-busy=true，发送钮变方块停止图标）、
     // 流式胶囊可见，或回答容器已有文本。
     const answerStarted = (): Promise<boolean> =>
@@ -412,49 +582,92 @@ export class DoubaoAdapter implements PlatformAdapter {
     // 输入框是否仍含原问题
     const stillHasInput = (): Promise<boolean> => enteredText().then((t) => t.includes(probe));
 
-    // 轮询等待回答开始，最迟 waitMs；输入框已清空也直接视为已提交
+    // 「系统异常」气泡识别：提交被服务端拒收时出现（问题文字通常被回填到输入框）。
+    // ⚠️ 同样必须判可见性（模板可能常驻 DOM 隐藏态，count() 会误报）。
+    const submitErrorSeen = async (): Promise<boolean> => {
+      const loc = this.page.locator('text=系统异常').first();
+      return (await loc.count().catch(() => 0)) > 0 && (await loc.isVisible().catch(() => false));
+    };
+
+    // 等待「提交被接受」的证据。⚠️ 豆包陷阱（2026-10-15 实测）：提交失败时先乐观清空输入框、
+    // 随后弹「系统异常」并把文字回填 → 「输入框已清空」必须持续 ≥3s 且期间无异常提示才可信。
+    // 出现系统异常或降级页 → 明确判失败（交重试/刷新处理）。
     const waitAnswerStart = async (waitMs: number): Promise<boolean> => {
       const t0 = Date.now();
+      let clearedAt = 0;
       while (Date.now() - t0 < waitMs) {
         if (await answerStarted()) return true;
-        if (!(await stillHasInput())) return true;
+        if (await submitErrorSeen() || (await this.pageUnavailable())) return false;
+        if (await stillHasInput()) {
+          clearedAt = 0;
+        } else {
+          if (!clearedAt) clearedAt = Date.now();
+          if (Date.now() - clearedAt >= 3000) return true; // 持续清空 3s = 提交被接受
+        }
         await this.page.waitForTimeout(1000);
       }
       return false;
     };
 
+    // 发送与确认：
+    //  ① 主路径 Enter 一次，确认窗口 navTimeoutMs（慢代理下回答开始可能远超 20s，
+    //     窗口过短会把「已发送但未开始」误判成失败 → 补发 → 重复提交，2026-10-15 实测）；
+    //  ② 仅在「文字仍在框」时允许兜底重试，且重试前复核就绪（按钮可用 + 工具钮在场），
+    //     间隔 6s、最多 2 次——系统异常后应用常需数秒才真正可接收消息；
+    //  ③ 文字已清空 / 答案已开始 → 立即停止一切补发。
+    const waitSubmitted = (waitMs: number): Promise<boolean> => waitAnswerStart(waitMs);
+    // 提交方式顺序（2026-10-15 多轮实测）：**点击发送钮为主**——人工点击与脚本点击每次成功；
+    // Enter 多次出现「死键无反应」或「系统异常 + 文字回填」，成功率显著低（网络抓包显示
+    // Enter 对应窗口内并无消息发送请求/无失败请求，即根本没触发提交）。故顺序为：
+    // ① 点击发送钮 → ② Enter → ③④ 间隔后再点击（最多 4 次动作，均由 waitSubmitted 确认）。
     let sentConfirmed = false;
-    for (let attempt = 0; attempt <= 2 && !sentConfirmed; attempt++) {
-      // 回答已开始 或 输入框已清空 → 均视为已提交
-      if ((await answerStarted()) || !(await stillHasInput())) {
-        sentConfirmed = true;
-        break;
-      }
-      if (attempt > 0) {
-        warn(`⚠️ 发送重试 #${attempt}：输入框仍含原问题且未见回答，再次发送`);
-      }
-      // 主发送：Enter（发送前随机停顿，模拟真人检查后发送）
+
+    /** 点击发送钮（不可用则不动作） */
+    const clickSend = async (): Promise<void> => {
+      if (!(await sendEnabled())) return;
+      const b = await firstFound(this.page, this.selectors.sendButton);
+      if (b) await b.locator.click().catch(() => {});
+    };
+    /** 敲回车提交 */
+    const pressEnter = async (): Promise<void> => {
       await this.page.waitForTimeout(randWaitMs(DOUBAO_INPUT_PRE_ENTER));
       await this.page.keyboard.press('Enter');
-      if (await waitAnswerStart(attempt === 0 ? 20000 : 8000)) {
-        sentConfirmed = true;
+    };
+
+    await this.page.waitForTimeout(randWaitMs(DOUBAO_INPUT_PRE_ENTER));
+    await clickSend();
+    if (await waitSubmitted(rem())) sentConfirmed = true;
+
+    for (let retry = 1; retry <= 3 && !sentConfirmed; retry++) {
+      if (Date.now() >= deadline) break; // 本轮预算用尽 → 交外层刷新重来
+      if (await this.pageUnavailable()) {
+        warn('⚠️ 页面降级（该页面暂时不可用）→ 交外层刷新恢复');
         break;
       }
-      // 主窗口未见回答：输入框仍含原问题 → 兜底点发送钮补发
-      if (await stillHasInput()) {
-        await input.locator.click().catch(() => {});
-        const send = await firstFound(this.page, this.selectors.sendButton);
-        if (send) await send.locator.click().catch(() => {});
-        if (await waitAnswerStart(attempt === 0 ? 6000 : 4000)) sentConfirmed = true;
-      } else {
-        // 输入框已清空：内容已提交，交后续等待
-        sentConfirmed = true;
+      if (!(await stillHasInput())) {
+        // 文字不在框：可能是「乐观清空」→ 用确认逻辑复核（含 3s 稳定 + 异常/降级检测）
+        sentConfirmed = await waitSubmitted(Math.min(8000, rem()));
+        break;
       }
+      if (await submitErrorSeen()) {
+        warn(`⚠️ 提交被拒（系统异常，文字仍在框）→ 第 ${retry} 次间隔重试`);
+      } else {
+        warn(`⚠️ Enter 未被确认（文字仍在框）→ 第 ${retry} 次兜底重试`);
+      }
+      await this.page.waitForTimeout(Math.min(6000, rem())); // 给应用恢复时间（系统异常后常需数秒）
+      if (!(await stillHasInput())) {
+        sentConfirmed = await waitSubmitted(Math.min(8000, rem()));
+        break;
+      }
+      const canSend = (await sendEnabled()) && ((this.selectors.inputAreaReady?.length ?? 0) === 0 || (await inputAreaReady()));
+      if (!canSend) { warn('⚠️ 重试前复核未就绪（按钮禁用/区未挂载），跳过本次补发'); continue; }
+      if (retry === 1) await pressEnter();
+      else await clickSend();
+      if (await waitSubmitted(Math.min(30000, rem()))) sentConfirmed = true;
     }
 
-    if (!sentConfirmed) {
-      warn('⚠️ 发送未能确认（多次重试仍未见回答），请人工检查发送交互');
-    }
+    if (!sentConfirmed) warn('⚠️ 本轮发送未确认（已达确认上限）');
+    return sentConfirmed;
   }
 
   // 模拟真人逐字输入：单字录入，随机间隔 180–450ms（用户反馈更快速度仍"太快"）；

@@ -13,12 +13,23 @@ export const DOUBAO_CANDIDATE_SELECTORS: CandidateSelectors = {
     'textarea',
     'textarea[placeholder]',
   ],
-  // 发送按钮（豆包输入区唯一圆钮，class 含 rounded-full + 18px SVG 图标）
-  // 注意：rounded-full 在页面多处出现（头像等），必须限定在输入区 .guidance-input-actions 内
+  // 发送按钮：2026-10-15 DOM 实测——语义 testid 最稳（data-testid="chat_input_send_button"），
+  // class 候选兜底。禁用态 = disabled 属性与 aria-disabled="true" 同步翻转。
+  // ⚠️ 严禁 Playwright 专属语法（如 >>）——选择器可能被拼进 page.evaluate 交浏览器原生
+  //    querySelectorAll 执行，遇到专属语法直接抛 SyntaxError（2026-10-15 实测踩坑）。
   sendButton: [
+    '[data-testid="chat_input_send_button"]',
     '.guidance-input-actions button[class*="rounded-full"]',
-    '.guidance-input-actions >> button[class*="rounded-full"]',
     'button[class*="rounded-full"]',
+  ],
+  // 会话区「真正挂载」标记：2026-10-15 DOM diff 实测（门齐基线 vs 提交后快照）——
+  // 「发送钮可用 + upload_file_button 在场」时页面仍处引导页状态（flow_chat_guidance_page 在场、
+  // 仅 13 个按钮），随后 30~35s 才挂载出会话组件；在此之前 Enter 是死键（无响应）或被拒（系统异常）。
+  // 下列晚期标记（模式选择器/技能栏/文件输入）出现即为真正可提交。软条件：超时告警后继续（防布局差异死等）。
+  inputAreaReady: [
+    '[data-testid="chat_input_action_model"]',
+    '[data-testid="skill_bar_button_more"]',
+    '[data-testid="upload-file-input"]',
   ],
   // 回答区域（容器）
   answerContainer: [
