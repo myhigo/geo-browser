@@ -2,6 +2,8 @@
 // getdps 响应：{ code, msg, data: { proxy_list: ["ip:port"], count } }，code=0 才算成功。
 // getdpsvalidtime 响应：{ code, data: { "ip:port": 剩余秒 } }。账密走配置，不在响应里。
 
+import fs from 'fs';
+import path from 'path';
 import { config } from '../config/index.js';
 import { log } from '../log.js';
 
@@ -26,6 +28,43 @@ interface CachedProxy extends ProxyOpts {
 const pool: CachedProxy[] = [];
 // 在途 refill 去重：同一时刻只打一次 getdps，并发等待者共享这一次结果
 let refillPromise: Promise<CachedProxy[]> | null = null;
+
+// 池持久化：<数据根>/dps-pool.json。重启后未到期的 IP 继续可用（不落凭证，读取时从配置注入）。
+const POOL_FILE = path.resolve(config.dataRoot, 'dps-pool.json');
+
+function savePool(): void {
+  try {
+    const data = {
+      savedAt: Date.now(),
+      // 只存 server 与时效，凭证不入盘
+      proxies: pool.map((p) => ({ server: p.server, validAt: p.validAt, checkedAt: p.checkedAt })),
+    };
+    fs.writeFileSync(POOL_FILE, JSON.stringify(data, null, 2));
+  } catch (e) {
+    log(`[dps] 池持久化失败（忽略）：${(e as Error).message}`);
+  }
+}
+
+function loadPool(): void {
+  try {
+    if (!fs.existsSync(POOL_FILE)) return;
+    const j = JSON.parse(fs.readFileSync(POOL_FILE, 'utf8')) as {
+      proxies?: { server: string; validAt: number; checkedAt: number }[];
+    };
+    let restored = 0;
+    for (const p of j.proxies ?? []) {
+      const c: CachedProxy = { server: p.server, validAt: p.validAt, checkedAt: p.checkedAt };
+      if (liveRemaining(c) > 0) {
+        pool.push(c);
+        restored++;
+      }
+    }
+    if (restored) log(`🌐 [dps] 从 ${POOL_FILE} 恢复 ${restored} 枚未到期 IP（凭证由配置注入）`);
+  } catch (e) {
+    log(`[dps] 池恢复失败（忽略）：${(e as Error).message}`);
+  }
+}
+loadPool();
 
 function liveRemaining(p: CachedProxy): number {
   return p.validAt - (Date.now() - p.checkedAt) / 1000;
@@ -116,7 +155,10 @@ async function ensureFresh(): Promise<CachedProxy[]> {
   if (!refillPromise) {
     refillPromise = (async () => {
       const fresh = await refill();
-      if (fresh.length) pool.push(...fresh);
+      if (fresh.length) {
+        pool.push(...fresh);
+        savePool();
+      }
       return fresh;
     })();
     refillPromise.finally(() => { refillPromise = null; }).catch(() => {});
@@ -138,12 +180,13 @@ export async function fetchDpsProxy(forceFresh = false): Promise<ProxyOpts | nul
     for (let i = pool.length - 1; i >= 0; i--) {
       if (liveRemaining(pool[i]) <= 0) pool.splice(i, 1);
     }
+    savePool();
     // 池内随机挑一枚剩余 >minTtl 的：均匀分散使用，不总是打剩余最高的那一枚
     const usable = pool.filter((p) => liveRemaining(p) > minTtl);
     if (usable.length) {
       const pick = usable[Math.floor(Math.random() * usable.length)];
       log(`🌐 [dps] 复用缓存代理：${pick.server}（剩余约 ${Math.round(liveRemaining(pick))}s，池内可用 ${usable.length} 枚）`);
-      return pick;
+      return withCreds(pick);
     }
   }
 
@@ -152,5 +195,14 @@ export async function fetchDpsProxy(forceFresh = false): Promise<ProxyOpts | nul
   if (!fresh.length) return null;
   const pick = fresh[Math.floor(Math.random() * fresh.length)];
   log(`🌐 [dps] 新取代理：${pick.server}（剩余约 ${Math.round(liveRemaining(pick))}s）`);
-  return pick;
+  return withCreds(pick);
+}
+
+/** 从配置注入账密：池内条目（含从盘上恢复的）不携带凭证 */
+function withCreds(p: CachedProxy): ProxyOpts {
+  return {
+    server: p.server,
+    ...(config.dps.username ? { username: config.dps.username } : {}),
+    ...(config.dps.password ? { password: config.dps.password } : {}),
+  };
 }
