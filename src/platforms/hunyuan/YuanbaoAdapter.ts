@@ -452,9 +452,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
   async waitForAnswer(timeoutMs = 180000): Promise<void> {
     const start = Date.now();
 
-    // 信号 A：AI 回答操作栏的「重新生成」或「赞/踩」按钮可见。
-    // 基线计数（2026-10-12 实测教训）：会话页残留上一轮回答的动作栏会让裸 waitForSelector
-    // 在 0.04s 即命中 → 假完成，可能把旧答案当本轮结果；与豆包/文心同思路，超过基线才算本轮完成。
+    // 动作栏计数：残留上一轮回答的动作栏会让裸判在发送后瞬间命中，须超过基线才算本轮。
     const countActionBar = async (): Promise<number> =>
       this.page
         .evaluate(() => {
@@ -464,114 +462,126 @@ export class YuanbaoAdapter implements PlatformAdapter {
         })
         .catch(() => 0);
     const actionBaseline = await countActionBar();
-    const actionBarDone = (async (): Promise<'action-bar' | 'action-bar-timeout'> => {
-      while (Date.now() - start < timeoutMs) {
-        if ((await countActionBar()) > actionBaseline) return 'action-bar';
-        await this.page.waitForTimeout(1000);
+
+    // 正文长度监控：多候选取「文本最长」——代理慢时 .agent-chat__bubble--ai 可能是空壳，
+    //   正文只出现在 [data-conv-speaker="ai"] / .hyc-common-markdown 等候选里。
+    const growthSels = this.selectors.answerContainer;
+    const getAnswerLen = async (): Promise<number | null> =>
+      this.page
+        .evaluate((sels) => {
+          let best = -1;
+          for (const s of sels) {
+            const nodes = document.querySelectorAll(s);
+            if (!nodes.length) continue;
+            const el = nodes[nodes.length - 1];
+            const len = (el.textContent || '').length;
+            if (len > best) best = len;
+          }
+          return best < 0 ? null : best;
+        }, growthSels)
+        .catch(() => null);
+
+    let lastLen: number | null = null;
+    let everGrew = false;
+    let noGrowth = 0;
+    let lastProgressLog = Date.now();
+    let hungStreak = 0; // 「按钮停在生成态但 AI 无输出」的连续秒数（request abort / 挂死识别）
+    let winner: 'action-bar' | 'text-stable' | 'text-stable-cache' | 'hung' | 'text-timeout' =
+      'text-timeout';
+
+    // 单循环判据（2026-10-19 合并）：动作栏原先走独立 Promise.race 且无任何正文约束，
+    //   而元宝工具栏在正文渲染前就挂出 → 实测 20% 轮次在 1~10s 判完成、只抽到「源」。
+    //   合并后动作栏与文本兜底共享同一份增长状态，判据才能叠加「正文已出现且稳定」。
+    while (Date.now() - start < timeoutMs) {
+      // 元宝澄清卡会中断回答并挂 60s 倒计时：每轮先探测并点【跳过所有】。
+      // 点掉后重置稳定计数 → 给真正的回答重新计时，避免把澄清卡误判成「回答已完成」。
+      if (await this.trySkipClarify()) {
+        lastLen = null;
+        everGrew = false;
+        noGrowth = 0;
       }
-      return 'action-bar-timeout';
-    })();
 
-    // 信号 B：文本长度先增长后稳定的兜底（仅在发送控件非生成态时生效——思考中文本不增长
-    //    但仍在输出，不可判完成，2026-10-12 用户提示；unknown 时保持原行为）
-    const textStableDone = (async (): Promise<
-      'text-stable' | 'text-timeout' | 'text-stable-cache' | 'hung'
-    > => {
-      // 多候选取「文本最长」（2026-10-15 实测）：代理慢时 .agent-chat__bubble--ai 可能是空壳，
-      //   正文只出现在 [data-conv-speaker="ai"] / .hyc-common-markdown 等候选里。
-      //   旧实现「join 后取最后一个」会命中空壳 → 监控恒为 0 字。
-      const growthSels = this.selectors.answerContainer;
-      const getAnswerLen = async (): Promise<number | null> =>
-        this.page
-          .evaluate((sels) => {
-            let best = -1;
-            for (const s of sels) {
-              const nodes = document.querySelectorAll(s);
-              if (!nodes.length) continue;
-              const el = nodes[nodes.length - 1];
-              const len = (el.textContent || '').length;
-              if (len > best) best = len;
-            }
-            return best < 0 ? null : best;
-          }, growthSels)
-          .catch(() => null);
+      const len = await getAnswerLen();
+      // 生成中信号（两条，任一成立即不得判完成）：
+      //   ① 发送控件生成态（aria-label=停止回答）；② 官方属性 AI 条 data-conv-outputting="true"
+      const st = await this.getSendState();
+      const outputting = await this.aiOutputting();
 
-      let lastLen: number | null = null;
-      let everGrew = false;
-      let noGrowth = 0;
-      let lastProgressLog = Date.now();
-      let hungStreak = 0; // 「按钮停在生成态但 AI 无输出」的连续秒数（request abort / 挂死识别）
+      // 挂死识别（2026-10-15 实测）：按钮停在「停止回答」但官方属性显示 AI 根本没在输出——
+      //   request abort 后元宝前端仍把按钮留在停止态，旧逻辑因此一路死等到硬上限（180s）。
+      if (st === 'generating' && !outputting) {
+        hungStreak += 1;
+        if (hungStreak >= 45) {
+          log(
+            `[${((Date.now() - start) / 1000).toFixed(1)}s] ⚠️ 发送控件停在生成态但 AI 无输出 ${hungStreak}s（疑似 request abort/挂死）→ 提前结束本轮`
+          );
+          winner = 'hung';
+          break;
+        }
+      } else {
+        hungStreak = 0;
+      }
 
-      while (Date.now() - start < timeoutMs) {
-        // 元宝澄清卡会中断回答并挂 60s 倒计时：每轮先探测并点【跳过所有】。
-        // 点掉后重置稳定计数 → 给真正的回答重新计时，避免把澄清卡误判成「回答已完成」。
-        if (await this.trySkipClarify()) {
-          lastLen = null;
-          everGrew = false;
+      if (len !== null) {
+        if (lastLen === null) {
+          lastLen = len;
+          // 首轮就有正文即视为「正文已出现」：极短答案后续不再增长，否则动作栏判据永远不成立，
+          //   只能退到 40s 兜底。
+          if (len > 0) everGrew = true;
+        } else if (len > lastLen + 2) {
+          lastLen = len;
+          everGrew = true;
           noGrowth = 0;
-        }
-
-        const len = await getAnswerLen();
-        // 生成中信号（两条，任一成立即不得按文本兜底判完成）：
-        //   ① 发送控件生成态（aria-label=停止回答）；② 官方属性 AI 条 data-conv-outputting="true"
-        const st = await this.getSendState();
-        const outputting = await this.aiOutputting();
-        // 挂死识别（2026-10-15 实测）：按钮停在「停止回答」但官方属性显示 AI 根本没在输出——
-        //   request abort 后元宝前端仍把按钮留在停止态，旧逻辑因此一路死等到硬上限（180s）。
-        if (st === 'generating' && !outputting) {
-          hungStreak += 1;
-          if (hungStreak >= 45) {
-            log(
-              `[${((Date.now() - start) / 1000).toFixed(1)}s] ⚠️ 发送控件停在生成态但 AI 无输出 ${hungStreak}s（疑似 request abort/挂死）→ 提前结束本轮`
-            );
-            return 'hung';
-          }
-        } else {
-          hungStreak = 0;
-        }
-        if (len !== null) {
-          if (lastLen === null) lastLen = len;
-          else if (len > lastLen + 2) {
-            lastLen = len;
-            everGrew = true;
-            noGrowth = 0;
-          } else {
-            noGrowth += 1;
-          }
         } else {
           noGrowth += 1;
         }
-
-        if (everGrew && noGrowth >= 8 && st !== 'generating' && !outputting) {
-          log(
-            `[${(Date.now() - start) / 1000}s] 🏁 元宝回答文本连续 8s 无增长（兜底），当前 ${lastLen ?? 0} 字`
-          );
-          return 'text-stable';
-        }
-        if (noGrowth >= 40 && st !== 'generating' && !outputting) {
-          log(
-            `[${(Date.now() - start) / 1000}s] 🏁 元宝文本连续 40s 无增长（可能缓存/瞬时答案），当前 ${lastLen ?? 0} 字`
-          );
-          return 'text-stable-cache';
-        }
-
-        if (Date.now() - lastProgressLog > 10000) {
-          const phase = everGrew ? '📝 回答流式输出中…' : '⏳ 检索/思考中…';
-          log(
-            `[${(Date.now() - start) / 1000}s] ${phase}（容器 ${len === null ? '未出现' : len + ' 字'}）`
-          );
-          lastProgressLog = Date.now();
-        }
-        await this.page.waitForTimeout(1000);
+      } else {
+        noGrowth += 1;
       }
-      return 'text-timeout';
-    })();
 
-    // 任意一个先到即完成
-    const winner = await Promise.race([actionBarDone, textStableDone]);
-    log(
-      `[${(Date.now() - start) / 1000}s] ✅ 元宝回答输出完成（信号: ${winner}），开始抽取`
-    );
+      // ⓪ 动作栏 + 正文已稳定 = 明确完成（正文未出现前不得视为完成）
+      if (
+        (await countActionBar()) > actionBaseline &&
+        everGrew &&
+        noGrowth >= 3 &&
+        st !== 'generating' &&
+        !outputting
+      ) {
+        log(
+          `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 检测到回答动作栏 + 文本已稳定，回答已完成（当前 ${lastLen ?? 0} 字）`
+        );
+        winner = 'action-bar';
+        break;
+      }
+
+      // 兜底 A：正文先增长后连续 8s 稳定
+      if (everGrew && noGrowth >= 8 && st !== 'generating' && !outputting) {
+        log(
+          `[${(Date.now() - start) / 1000}s] 🏁 元宝回答文本连续 8s 无增长（兜底），当前 ${lastLen ?? 0} 字`
+        );
+        winner = 'text-stable';
+        break;
+      }
+      // 兜底 B：从未增长/增长后长时间静默
+      if (noGrowth >= 40 && st !== 'generating' && !outputting) {
+        log(
+          `[${(Date.now() - start) / 1000}s] 🏁 元宝文本连续 40s 无增长（可能缓存/瞬时答案），当前 ${lastLen ?? 0} 字`
+        );
+        winner = 'text-stable-cache';
+        break;
+      }
+
+      if (Date.now() - lastProgressLog > 10000) {
+        const phase = everGrew ? '📝 回答流式输出中…' : '⏳ 检索/思考中…';
+        log(
+          `[${(Date.now() - start) / 1000}s] ${phase}（容器 ${len === null ? '未出现' : len + ' 字'}）`
+        );
+        lastProgressLog = Date.now();
+      }
+      await this.page.waitForTimeout(1000);
+    }
+
+    log(`[${(Date.now() - start) / 1000}s] ✅ 元宝回答输出完成（信号: ${winner}），开始抽取`);
     // 挂死识别：等待结束时发送控件仍处于生成态（流未断但无输出，疑似风控/服务异常）。
     // 动作栏明确完成退出时不提示——退出瞬间控件可能尚未翻回发送态，属误报（2026-10-12 实测）。
     if (winner !== 'action-bar' && winner !== 'hung' && (await this.getSendState()) === 'generating') {
@@ -601,11 +611,30 @@ export class YuanbaoAdapter implements PlatformAdapter {
         }
         if (!el) return null;
         const clone = el.cloneNode(true) as HTMLElement;
+        // 先剔除气泡内的 UI / 过程区块（2026-10-19 实测归档 DOM）：思考面板「已处理」、
+        //   深度搜索过程时间线、过程卡片、「快速回答」按钮、信源区。
+        //   顺序很重要——过程时间线内部也含 .hyc-content-md，不先删会干扰下面的正文定位。
         clone
           .querySelectorAll(
-            'script, style, noscript, template, iframe, [class*="reference"], [class*="card_video"], [class*="video_note"]'
+            'script, style, noscript, template, iframe, ' +
+              '[class*="reference"], [class*="card_video"], [class*="video_note"], ' +
+              '[class*="agent-process-timeline"], [class*="card-box-process-list"], ' +
+              '[class*="think-container"], [class*="__think"], [class*="DirectAnswerButton"]'
           )
           .forEach((n) => n.remove());
+
+        // 正文根取「文本最长」的正文容器：动作栏「源」、推荐追问、下载推广位都在正文之外，
+        //   以正文容器的文本为界即可天然排除（比删整气泡更稳）。
+        //   ⚠️ 不能按 [class*="deep-search-agent"] 删——实测 .hyc-content-md 是它的子节点。
+        let root: Element = clone;
+        let rootLen = -1;
+        clone.querySelectorAll('.hyc-content-md, .hyc-common-markdown').forEach((n) => {
+          const len = (n.textContent || '').length;
+          if (len > rootLen) {
+            rootLen = len;
+            root = n;
+          }
+        });
 
         // 剔除「纯空白文本节点」（2026-10-16 实测定位）：元宝在块级 </div> 与 </span> 之间留了**字面
         //   换行文本节点**——原文片段：`…复购型电商。</div>\n</span>`。结构遍历把这个 "\n" 当内容，
@@ -613,7 +642,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
         //   实测对应关系：气泡内 `>\n<` 出现 36 次，抽取结果正好 36 个空行 → 一一对应。
         //   ⚠️ 只在元宝做：豆包/文小言的空行来自真实的块级嵌套（是其可读性来源，用户已认可现状），
         //     放进通用 elementToText 会把它们压成一堵墙。
-        const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
         const blanks: Text[] = [];
         let node = walker.nextNode();
         while (node) {
@@ -625,7 +654,7 @@ export class YuanbaoAdapter implements PlatformAdapter {
           if (n.parentNode) n.parentNode.removeChild(n);
         });
 
-        const txt = toText(clone);
+        const txt = toText(root);
         return txt || null;
       }, { sels: this.selectors.answerContainer, src: elementToText.toString() })
       .catch(() => null);

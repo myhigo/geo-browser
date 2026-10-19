@@ -1,6 +1,6 @@
 import { runDiagnostic } from './diagnostics/run.js';
 import { startServer } from './server/server.js';
-import { LOGIN_DRIVERS, allocateAccount, releaseAccount } from './server/loginRegistry.js';
+import { LOGIN_DRIVERS, allocateAccount, releaseAccount, proxyOf, dropInFlight } from './server/loginRegistry.js';
 import { config } from './config/index.js';
 
 const args = process.argv.slice(2);
@@ -68,8 +68,10 @@ async function main(): Promise<void> {
   let execWaitLoginMs = waitLoginMs;
   // 动态出口：台账账号的 ipMode=dynamic 时，由 runDiagnostic 按「账号↔IP」绑定取出口 IP
   //（此前 CLI 未传 dynamic，动态账号实际走了直连并误触平台熔断）。
+  // 静态出口：ipMode=static 时在此解析绑定的静态代理，解析不到即报错退出（绝不回退直连）。
   let execDynamic = false;
   let execAccountId: string | undefined;
+  let execProxy: Awaited<ReturnType<typeof proxyOf>>;
   if (driver && pfi < 0) {
     const ready = await allocateAccount(platform);
     if (!ready.ok || !ready.accountId || !ready.dir) {
@@ -81,7 +83,16 @@ async function main(): Promise<void> {
     execWaitLoginMs = 0; // 台账账号应已登录；撞登录墙由归还逻辑标记 failed
     execDynamic = ready.ipMode === 'dynamic';
     execAccountId = ready.accountId;
-    console.log(`👤 使用台账账号：${ready.accountId}（${ready.dir}，出口 ${execDynamic ? '动态IP' : '本地/静态'}）`);
+    if (!execDynamic) {
+      try {
+        execProxy = await proxyOf(platform, ready.accountId);
+      } catch (e) {
+        dropInFlight(ready.accountId);
+        console.error(`❌ ${(e as Error).message}`);
+        process.exit(1);
+      }
+    }
+    console.log(`👤 使用台账账号：${ready.accountId}（${ready.dir}，出口 ${execDynamic ? '动态IP' : execProxy ? '静态IP' : '本地IP'}）`);
   }
 
   const result = await runDiagnostic(question, {
@@ -92,6 +103,7 @@ async function main(): Promise<void> {
     screenshotMode,
     userDataDir: execDir,
     waitLoginMs: execWaitLoginMs,
+    proxy: execProxy,
     dynamic: execDynamic,
     accountId: execAccountId,
   });

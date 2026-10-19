@@ -373,3 +373,74 @@ if (bars > actionBaseline && noGrowthStreak >= 3 && st !== 'generating') {
 **代价**：正常答完时动作栏判据最多多等 ~3s（等到文本连续 3s 无增长）。
 
 **影响面核对**：两平台的 `getSendState()` 均可靠（豆包 = 中断钮 `chat_input_local_break_button` 在场；文小言 = `ci-submit-pause`），且两平台所有纯文本兜底本就带 `st !== 'generating'`，故此约束不引入新的「永不完成」路径。最坏情形是动作栏出现时中断钮短暂残留（`:1053` 注释已载明）→ 落回既有判定 ①/②，多等数秒而非死等。
+
+## 14. 元宝（hunyuan）动作栏早于正文 + 抽取混入 UI 区块（2026-10-19，**已修复**）
+
+### 14.1 现象
+
+用户反馈「元宝结果只有一个『源』字」（提问词：小程序拼团用什么工具）。当日元宝 51 轮中 **10 轮（20%）** 的 `answerText` ≤2 字，内容恒为「源」。
+
+### 14.2 根因一：动作栏裸判（比豆包/文小言更早触发）
+
+`YuanbaoAdapter.waitForAnswer` 原结构是两个独立 async 闭包 + `Promise.race`：
+
+- `actionBarDone`：每秒数 `[class*="Repeat_"], [class*="ToolbarSuitable_"]`，超过基线即返回 `'action-bar'`
+- `textStableDone`：文本增长/稳定兜底，`everGrew` / `noGrowth` 锁在闭包内
+
+元宝在**正文渲染之前**就把工具栏挂出来了，此刻气泡里只有工具栏 + 一个「源」指引（`.ToolbarSearchGuid_source`）。裸判立刻命中 → `Promise.race` 返回 → `run.ts` 的 `getAnswer()` 在正文之前执行。
+
+实测 10 轮的信号耗时 **1.0~10.5s**，而正常轮 5.8~32.6s —— **区间重叠，不能用时间阈值区分**。
+
+决定性证据（`diagnostics/hunyuan/2026-10-16/17-41-04-*`）：3.4s 抽出 1 字，但 11.1s 时兜底日志已报容器 1147 字、17.3s 报「连续 8s 无增长 1147 字」，且该轮留存截图（比抽取晚 5s）显示完整回答。
+
+### 14.3 修复：合并单循环 + 叠加正文约束
+
+去掉 `Promise.race`，动作栏与文本兜底共享同一份 `everGrew` / `noGrowth` / `lastLen`：
+
+```ts
+if ((await countActionBar()) > actionBaseline && everGrew && noGrowth >= 3
+    && st !== 'generating' && !outputting) return 'action-bar';
+```
+
+`everGrew` 在「首轮观测到非空正文」时即置 true（原实现要求 `len > lastLen + 2` 才置位）——否则极短答案永远不满足，只能退到 40s 兜底。
+
+挂死识别（`hung`，45s）、兜底 A（8s）、兜底 B（40s）语义全部保留。
+
+### 14.4 根因二：抽取混入 UI 区块
+
+`getAnswer()` 取「文本最长」候选 = 整个 AI 气泡，而气泡内除正文外还有：
+
+| 区块 | 混入文本 |
+|---|---|
+| 思考面板 `[class*="__think"]` | 已处理 |
+| 动作栏 `.agent-chat__conv--ai__toolbar` | 源 |
+| 推荐追问 `[class*="promptHint"]` | 3 条推荐问题 |
+| 下载推广 `.download_hint__wrap` | 下载元宝电脑版，体验高效 AI 助手 |
+| 过程时间线 `[class*="agent-process-timeline"]` | 「已确认需求，运行1次命令」等过程文本 |
+
+**踩坑（必须记住）**：`.hyc-content-md` 是 `.hyc-component-deep-search-agent` 的**子节点**，按 `[class*="deep-search-agent"]` 剔除会把正文一起删掉 → 抽到 0 字。
+
+最终实现：**先剔除 UI/过程区块（timeline、think、process-list、DirectAnswerButton、信源），再在剩余 DOM 中取「文本最长」的 `.hyc-content-md / .hyc-common-markdown` 作为根**读取。
+
+### 14.5 验证
+
+离线审计台 11 份归档（`diagnostics/hunyuan/2026-10-09/*/page/finished.html`）：
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| 噪音行（已处理/快速回答/源/下载元宝） | 每轮 2~7 行 | **0** |
+| 空行 | 0 | 0 |
+| 正文完整度 | 含 UI 尾巴 | 10 轮正文完整；1 轮（19-03-02）归档只有过程时间线、无正文 → 返回 null（原为 538 字过程噪音） |
+
+合成页面验证台 `analysis/hunyuan-actionbar.mts`：
+
+| 场景 | 结果 |
+|---|---|
+| shell（动作栏 1s 出现、正文 3s 才开始） | 9.3s 判完成、抽到 400 字（旧代码会抽出「源」） |
+| slow（正文每秒 20 字流式 12s） | 14.4s 判完成、200 字，无中途截断 |
+| fast（正文瞬间 300 字） | 5.2s 判完成、300 字（多等 ~3s，为稳定约束的代价） |
+| short（4 字极短答案） | 5.2s 判完成、4 字（未退到 40s 兜底） |
+
+### 14.6 顺带修复：CLI 不传静态代理
+
+`src/cli.ts` 挑出台账账号后只传 `dynamic`，从未调用 `proxyOf` —— 静态账号用命令行单跑会**静默直连**。现已在非 dynamic 时解析静态代理，解析失败打错误日志 + `dropInFlight` 清占用后退出（与服务端 `server.ts:201-209` 行为一致）。
