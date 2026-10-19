@@ -325,3 +325,51 @@ recoverPage 18s（未进登录页）
 CLI 单发路径（`analysis/*.mts`、手工复核）**不写** `geo-browser-data/logs/geo-browser.log`，只落 `diagnostics/<平台>/<日期>/` 样本目录。
 故 11:28 / 11:32 两轮验证不在服务日志里（该日志止于 10:38），核验请查：
 `diagnostics/doubao/2026-10-16/11-28-53-…`、`11-32-43-…`（`notes: []`、答案 2303 / 2004 字、信源 21 / 22 条）。
+
+## 13. 回答动作栏「裸判」导致流式截断（2026-10-16 第四轮，**已修复**）
+
+### 现象（用户反馈）
+5 个浏览器同时开着、2M 被 5 路分摊时，**豆包回答到一半程序就结束了**（提问词：多门店新零售系统怎么选）。
+
+### 现场（15:19:40 轮，doubao-20）
+| 时刻 | 日志 |
+|---|---|
+| 15:22:42 | ⚠️ 首查未见输入框（水合慢）——起浏览器后约 3 分钟才拿到输入框 |
+| 15:24:19 | 🖱️ 已点击发送钮 |
+| 15:24:47 | `[10.6s]` 📝 回答流式输出中…（容器 319 字） |
+| 15:24:54 | `[17.8s]` 🏁 检测到回答动作栏…回答已完成（当前 **428 字**）← **在此 break** |
+
+三条证据证明是**误判**：① 文本还在涨（319 → 428 字，7s 涨 109 字）；② `result.json` 的 `answerText` 断句停在「先把这几个问题确定，否则很容易买错」；③ `screenshot/05-qa-block.png` 停在「2. 门店规模 / ○ 1~5」——列表项刚开头就没了。
+
+### 根因
+结束判定 ⓪（优先级最高、命中即 break）此前是**裸判**：
+
+```ts
+const bars = await countActionBar();
+if (bars > actionBaseline) { … break; }   // ← 无任何文本稳定 / 生成态约束
+```
+
+`countActionBar` 统计可见的 `button[aria-label="朗读"]` / `button[aria-label="更多"]`，基线在发送前采集。**慢网络下豆包会在流式输出途中就把这两个按钮渲染出来** → 判据提前命中 → 截断。
+
+**为什么平时不暴露**：正常网络豆包数秒答完，动作栏出现时答案已基本完整；2M 被 5 路分摊（每路 ~50KB/s）后流式拉长到数十秒，问题才显现。**这是慢网络放大的既有缺陷，非本次新引入。**
+
+### 修复（已落地）
+给 ⓪ 补上「文本已稳定」约束，与 DeepSeek（`DeepseekAdapter.ts:247`：`actBars > baseline && noGrowthStreak >= 3`）对齐：
+
+```ts
+if (bars > actionBaseline && noGrowthStreak >= 3 && st !== 'generating') {
+```
+
+| 平台 | 位置 | 状态 |
+|---|---|---|
+| 豆包 | `DoubaoAdapter.ts:1002` | ✅ 已改 |
+| 文小言 | `WenxinAdapter.ts:324` | ✅ 已改（同因） |
+| 元宝 | `YuanbaoAdapter.ts:469` | ⚠️ **同因未改**——它的判据在独立 Promise `actionBarDone` 里与 `textStableDone` 竞速（`:571` `Promise.race`），跨 Promise 无共享的 `noGrowthStreak`，需单独一轮处理 |
+| DeepSeek | `:247` | ✅ 本就有约束（参照） |
+| 千问 | `:301` | ✅ 用官方 `qk-markdown-complete`，权威信号无需改 |
+
+**双重约束的作用**：`noGrowthStreak >= 3` 拦住「流式中途」（豆包 `:940` 在 `streaming` 为真时把该计数归零 → 流式期间恒为 0）；`st !== 'generating'` 拦住发送控件仍在生成态的情况。
+
+**代价**：正常答完时动作栏判据最多多等 ~3s（等到文本连续 3s 无增长）。
+
+**影响面核对**：两平台的 `getSendState()` 均可靠（豆包 = 中断钮 `chat_input_local_break_button` 在场；文小言 = `ci-submit-pause`），且两平台所有纯文本兜底本就带 `st !== 'generating'`，故此约束不引入新的「永不完成」路径。最坏情形是动作栏出现时中断钮短暂残留（`:1053` 注释已载明）→ 落回既有判定 ①/②，多等数秒而非死等。

@@ -121,6 +121,8 @@ export interface AppConfig {
   pullDailyAt: string;
   /** 每日检测往前覆盖的天数：1=昨天，3=前三天 */
   pullDaysBack: number;
+  /** 拉词分页大小：每页取多少个词派发采集（采完本页才拉下一页，默认 100） */
+  pullPageSize: number;
   /** 快代理私密代理：配了 secretId 则走动态出口（按「账号↔IP」绑定取 IP，见 proxy/dpsProxy.ts） */
   dps: DpsConfig;
   /** 产物是否落盘 */
@@ -133,6 +135,8 @@ export interface AppConfig {
   ipIntervalSec: number;
   /** (平台,IP) 冷却间隔（秒）：真实出口冷却已由账号冷却取代，现仅作 markCooldown 的默认时长 */
   platformIpIntervalSec: number;
+  /** 静态出口冷却（秒）：同一平台同一枚静态 IP 两次提问的最小间隔（默认 30） */
+  staticIpIntervalSec: number;
   /** 账号冷却区间（秒）：账号释放后到下次可被挑选的等待时长，区间内随机取值
    *  （GEO_ACCOUNT_INTERVAL_SEC=120-300 区间随机，或 180 单值固定；默认 120-300） */
   accountInterval: { min: number; max: number };
@@ -216,6 +220,7 @@ export const config: AppConfig = {
   pullHost: env('GEO_PULL_HOST') ?? '',
   pullDailyAt: env('GEO_PULL_DAILY_AT') ?? '',
   pullDaysBack: Math.max(1, Math.floor(num('GEO_PULL_DAYS_BACK', 1))) || 1,
+  pullPageSize: Math.max(1, Math.floor(num('GEO_PULL_PAGE_SIZE', 100))) || 100,
   dps: {
     secretId: env('GEO_DPS_SECRET_ID') ?? '',
     secretKey: env('GEO_DPS_SECRET_KEY') ?? '',
@@ -230,6 +235,7 @@ export const config: AppConfig = {
   headless: bool('GEO_HEADLESS', true),
   ipIntervalSec: num('GEO_IP_INTERVAL', 120),
   platformIpIntervalSec: num('GEO_PLATFORM_IP_INTERVAL', 120),
+  staticIpIntervalSec: num('GEO_STATIC_IP_INTERVAL_SEC', 30),
   accountInterval: intervalRange('GEO_ACCOUNT_INTERVAL_SEC', '120-300'),
   dynFallbackSec: num('GEO_DYN_FALLBACK_SEC', 600),
   navTimeoutMs: num('GEO_NAV_TIMEOUT_MS', 30000),

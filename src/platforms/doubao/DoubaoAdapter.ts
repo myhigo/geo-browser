@@ -992,10 +992,14 @@ export class DoubaoAdapter implements PlatformAdapter {
       }
 
       // —— 结束判定 ⓪ 动作栏出现 = 明确完成（优先级最高，元素驱动；用户 2026-09-04 提议）——
+      // ⚠️ 必须带「文本已稳定」约束（2026-10-16 实测）：慢网络下豆包会在**回答流式输出中途**就渲染出
+      //   动作栏（朗读/更多），裸判会把流式截断——15:19 轮在 428 字处中断，答案只答了一半
+      //   （截图停在「2. 门店规模 ○ 1~5」；2M 被 5 路并发分摊、流式拉长到数十秒才暴露）。
+      //   与 DeepSeek 对齐：需 连续 3s 无增长 + 非生成态 才算真完成。正常答完时最多多等 ~3s。
       const bars = await countActionBar();
-      if (bars > actionBaseline) {
+      if (bars > actionBaseline && noGrowthStreak >= 3 && st !== 'generating') {
         log(
-          `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 检测到回答动作栏（复制/朗读/…/更多），回答已完成（当前 ${lastLen ?? 0} 字）`
+          `[${((Date.now() - start) / 1000).toFixed(1)}s] 🏁 检测到回答动作栏（复制/朗读/…/更多）+ 文本已稳定，回答已完成（当前 ${lastLen ?? 0} 字）`
         );
         endedExplicitly = true;
         break;

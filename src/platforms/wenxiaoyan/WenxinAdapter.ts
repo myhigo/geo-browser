@@ -320,10 +320,12 @@ export class WenxinAdapter implements PlatformAdapter {
       const st = await this.getSendState();
 
       // —— 结束判定 ⓪ 动作栏出现 = 明确完成（优先级最高，用户 2026-09-04 提议）——
+      // ⚠️ 必须带「文本已稳定」约束（2026-10-16，与豆包同因）：慢网络下动作栏可能在回答**流式输出
+      //   中途**就渲染出来，裸判会截断答案。需 连续 3s 无增长 + 非生成态 才算真完成。
       const bars = await countActionBar();
-      if (bars > actionBaseline) {
+      if (bars > actionBaseline && noGrowthStreak >= 3 && st !== 'generating') {
         log(
-          `[${((Date.now() - start) / 1000).toFixed(0)}s] 🏁 检测到回答动作栏（复制/朗读/…），回答已完成（当前 ${lastLen ?? 0} 字）`
+          `[${((Date.now() - start) / 1000).toFixed(0)}s] 🏁 检测到回答动作栏（复制/朗读/…）+ 文本已稳定，回答已完成（当前 ${lastLen ?? 0} 字）`
         );
         endedExplicitly = true;
         break;

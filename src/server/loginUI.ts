@@ -87,6 +87,8 @@ var ACC_PLATFORM = null;
 var PANEL_KEY = null;
 // 静态IP管理：正在编辑的代理 id（null=无编辑态）
 var PX_EDITING = null;
+// 静态IP管理：连通性测试结果 id -> {ok, text}（仅前端内存态，5s 轮询重建不清空）
+var PX_TEST = {};
 var ST = { none:{t:'未登录',c:'#c9cdd4'}, waiting:{t:'登录中',c:'#ff7d00'}, active:{t:'已登录',c:'#00b42a'}, cooling:{t:'冷却中',c:'#ff7d00'}, failed:{t:'不可用',c:'#f53f3f'} };
 function $(s){ return document.querySelector(s); }
 function toast(m){ var t=$('#toast'); t.textContent=m; t.classList.add('show'); setTimeout(function(){ t.classList.remove('show'); }, 2400); }
@@ -309,7 +311,9 @@ function pxTick(){
         + '<div class="meta">最近使用：<b>'+(p.lastUsedAt?new Date(p.lastUsedAt).toLocaleString():'从未使用')+'</b></div>'
         + (p.username?'<div class="meta">账号：<b>'+esc(p.username)+'</b></div>':'')
         + (p.note?'<div class="meta">备注：<b>'+esc(p.note)+'</b></div>':'')
+        + (PX_TEST[p.id]?'<div class="meta" style="color:'+(PX_TEST[p.id].ok?'#00b42a':'#f53f3f')+';">连通性：<b>'+esc(PX_TEST[p.id].text)+'</b></div>':'')
         + '<div class="btns">'
+        + '<button data-px="'+p.id+'" data-pxact="test">测试</button>'
         + '<button data-px="'+p.id+'" data-pxact="edit">编辑</button>'
         + '<button data-px="'+p.id+'" data-pxact="toggle" data-en="'+(p.enabled?'1':'0')+'">'+(p.enabled?'停用':'启用')+'</button>'
         + '<button class="danger" data-px="'+p.id+'" data-pxact="del">删除</button>'
@@ -553,6 +557,19 @@ document.addEventListener('click', function(ev){
     var act = px.getAttribute('data-pxact');
     if(act==='edit'){ PX_EDITING=pid; pxTick(); return; }
     if(act==='cancel'){ PX_EDITING=null; pxTick(); return; }
+    if(act==='test'){
+      PX_TEST[pid] = { ok:true, text:'测试中…' };
+      pxTick();
+      fetch('/api/proxies/'+pid+'/test', { method:'POST' })
+        .then(function(r){ return r.json().catch(function(){ return {msg:'响应解析失败'}; }); })
+        .then(function(j){
+          PX_TEST[pid] = { ok: !!(j&&j.ok), text: (j&&j.msg)||'已测试' };
+          toast((j&&j.msg)||'已测试');
+          pxTick();
+        })
+        .catch(function(e){ PX_TEST[pid] = { ok:false, text:'请求失败：'+e.message }; pxTick(); });
+      return;
+    }
     if(act==='del' && !confirm('确认删除该代理 IP？已绑定账号时会拒绝删除，需先到账号管理解绑。')) return;
     var opt;
     if(act==='save'){

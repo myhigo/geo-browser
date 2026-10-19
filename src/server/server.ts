@@ -4,7 +4,7 @@ import path from 'path';
 import { exec } from 'child_process';
 import { runDiagnostic } from '../diagnostics/run.js';
 import { SourceInfo, DiagnosticResult } from '../types.js';
-import { CaptchaBlockedError } from '../errors.js';
+import { CaptchaBlockedError, StaticProxyUnavailableError } from '../errors.js';
 import { appendCollectFail } from '../storage/collectFailLog.js';
 import { PLATFORMS } from '../platforms/index.js';
 import { ENABLED_PLATFORMS, PullConfig, runPullRound } from './pull.js';
@@ -29,6 +29,7 @@ import {
   loginBusy,
   logoutAccount,
   proxyOf,
+  dropInFlight,
   releaseAccount,
   startLogin,
   testAccount,
@@ -39,7 +40,8 @@ import {
 import { adminPageHtml } from './loginUI.js';
 import { config, paths, describeConfig } from '../config/index.js';
 import { accountRepo, Account, profileDirOf, accountDirOf } from '../storage/accountRepo.js';
-import { proxyRepo, splitProxyHost } from '../storage/proxyRepo.js';
+import { proxyRepo, splitProxyHost, isDirectIp } from '../storage/proxyRepo.js';
+import { testProxy } from '../proxy/proxyTest.js';
 import { pingDb, releaseStaleLeases } from '../db/pool.js';
 import { identityRepo } from '../storage/identityRepo.js';
 
@@ -195,7 +197,17 @@ export async function execute(
   if (ledgerAccountId) {
     const a = await accountRepo().get(platform, ledgerAccountId);
     useDynamic = !!a && a.ipMode === 'dynamic';
-    collectProxy = useDynamic ? undefined : await proxyOf(platform, ledgerAccountId);
+    if (!useDynamic) {
+      try {
+        collectProxy = await proxyOf(platform, ledgerAccountId);
+      } catch (e) {
+        // 静态出口不可用：绝不降级直连（否则以本机 IP 裸奔）。清掉占用标记后按配置错误终止本轮，
+        // 不写账号冷却——配置问题不该让账号白吃一次 120~180s。
+        dropInFlight(ledgerAccountId);
+        if (e instanceof StaticProxyUnavailableError) throw new ApiError(409, e.message);
+        throw e;
+      }
+    }
   }
   let result: DiagnosticResult;
   try {
@@ -402,7 +414,7 @@ function launchPullRound(o: PullRoundOpts): void {
   pullStatus.host = o.host;
   pullStatus.stopping = false;
   pullSignal = { aborted: false };
-  const cfg: PullConfig = { host: o.host, pageSize: 20, startTime: o.startTime, endTime: o.endTime };
+  const cfg: PullConfig = { host: o.host, pageSize: config.pullPageSize, startTime: o.startTime, endTime: o.endTime };
   const stamp = (): string => {
     const d = new Date();
     const p = (n: number): string => String(n).padStart(2, '0');
@@ -1000,7 +1012,6 @@ app.patch('/api/proxies/:id', async (req, res) => {
   if (typeof b.note === 'string') patch.note = b.note.trim();
 
   // 出口字段（host/port/protocol）编辑：host 支持「IP:端口」或独立端口字段，校验与添加一致
-  let exitChanged = false;
   if (typeof b.host === 'string' || typeof b.port === 'number' || typeof b.port === 'string' || typeof b.protocol === 'string') {
     const cur = await proxyRepo().get(id);
     if (!cur) {
@@ -1030,7 +1041,6 @@ app.patch('/api/proxies/:id', async (req, res) => {
       patch.host = parsed.host;
       patch.port = port;
       patch.protocol = protocol;
-      exitChanged = true;
     }
   }
 
@@ -1040,20 +1050,58 @@ app.patch('/api/proxies/:id', async (req, res) => {
       res.status(404).json({ msg: '代理不存在' });
       return;
     }
-    // 出口变更 → 绑定账号的登录态归属旧出口，提示重新登录
-    if (exitChanged) {
-      for (const pid of Object.keys(LOGIN_DRIVERS)) {
-        const accs = await accountRepo().list(pid).catch(() => [] as never[]);
-        for (const a of accs as Array<{ id: string; proxyId?: number | null }>) {
-          if (a.proxyId === id) {
-            await accountRepo().patch(pid, a.id, { note: '代理已变更，需重新登录' }).catch(() => {});
-          }
-        }
-      }
-    }
+    // 出口变更不影响账号归属：账号绑定的是 proxyId，记录仍指向同一账号，无需重新登录
     res.status(200).json({ ok: true, msg: '已更新' });
   } catch (e) {
     res.status(500).json({ msg: `更新失败：${(e as Error).message}` });
+  }
+});
+
+// 静态代理连通性测试：经该代理打开取 IP 页面，返回真实出口 IP 与耗时。
+// 与采集用同一套浏览器启动方式（系统 Chrome），验证的是「这个代理能不能真的跑采集」。
+const proxyTesting = new Set<number>();
+app.post('/api/proxies/:id/test', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ msg: 'id 无效' });
+    return;
+  }
+  const ip = await proxyRepo().get(id);
+  if (!ip) {
+    res.status(404).json({ msg: '代理不存在' });
+    return;
+  }
+  if (ip.enabled === false) {
+    res.status(400).json({ msg: '该 IP 已停用，请先启用再测试' });
+    return;
+  }
+  if (isDirectIp(ip)) {
+    res.status(400).json({ msg: '直连行无需测试' });
+    return;
+  }
+  if (proxyTesting.has(id)) {
+    res.status(409).json({ msg: '该 IP 正在测试中，请稍候' });
+    return;
+  }
+  proxyTesting.add(id);
+  try {
+    const server = (ip.protocol === 'socks5' ? 'socks5://' : 'http://') + ip.host + ':' + ip.port;
+    const r = await testProxy({ server, username: ip.username, password: ip.password });
+    if (r.ok) {
+      res.status(200).json({
+        ok: true,
+        msg: `出口 ${r.exitIp}（${(r.ms / 1000).toFixed(1)}s）`,
+        exitIp: r.exitIp,
+        ms: r.ms,
+        detail: r.detail,
+      });
+    } else {
+      res.status(502).json({ ok: false, msg: `测试失败：${r.error}`, ms: r.ms });
+    }
+  } catch (e) {
+    res.status(500).json({ msg: `测试异常：${(e as Error).message}` });
+  } finally {
+    proxyTesting.delete(id);
   }
 });
 

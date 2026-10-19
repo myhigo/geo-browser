@@ -15,17 +15,31 @@ import { accountRepo, Account, accountDirOf } from '../storage/accountRepo.js';
 import { proxyRepo, isDirectIp } from '../storage/proxyRepo.js';
 import { paths, config } from '../config/index.js';
 import { err } from '../log.js';
+import { StaticProxyUnavailableError } from '../errors.js';
 import { raiseWindow, nextWindowPosition } from '../windowRaise.js';
 
 /** 传给 Playwright 的代理选项（直连/不存在/未启用 → undefined 表示不注入） */
 export type ProxyOpts = { server: string; username?: string; password?: string; bypass?: string };
 
+/** 静态出口不可用：打错误日志并抛错（绝不回退直连，防以本机 IP 裸奔） */
+function staticUnavailable(acc: Account, why: string): StaticProxyUnavailableError {
+  const msg = `静态出口不可用：账号 ${acc.id} ${why}`;
+  err(`[proxy] ${msg}`);
+  return new StaticProxyUnavailableError(msg);
+}
+
 /** 按账号对象解析采集代理：仅 static 走绑定静态代理；local 直连；dynamic 由采集层（server.ts）截留走快代理。
- *  以 ipMode 为准，不再按 proxyId 隐式判定——未配置视为 local（直连） */
+ *  以 ipMode 为准，不再按 proxyId 隐式判定——未配置视为 local（直连）
+ *  static 解析不到可用出口时抛 StaticProxyUnavailableError，由调用方转成失败响应。 */
 export async function proxyOfAccount(acc: Account): Promise<ProxyOpts | undefined> {
   if (acc.ipMode !== 'static') return undefined; // local/dynamic 不在此解析
-  if (acc.proxyId == null) return undefined;
-  return proxyOfId(acc.proxyId);
+  if (acc.proxyId == null) throw staticUnavailable(acc, '未绑定代理 IP');
+  const ip = await proxyRepo().get(acc.proxyId);
+  if (!ip) throw staticUnavailable(acc, `绑定的代理记录不存在（proxyId=${acc.proxyId}）`);
+  if (ip.enabled === false) throw staticUnavailable(acc, `绑定的代理已停用（${ip.host}:${ip.port}）`);
+  if (isDirectIp(ip)) throw staticUnavailable(acc, '绑定的代理是直连行（端口 0），不能作为静态出口');
+  const server = (ip.protocol === 'socks5' ? 'socks5://' : 'http://') + ip.host + ':' + ip.port;
+  return { server, username: ip.username, password: ip.password };
 }
 
 /** 按 proxyId 解析代理：直连 / 不存在 / 未启用 → undefined（不注入） */
@@ -225,6 +239,9 @@ const coolKey = (platform: string, ip: string): string => `${platform}:${ip}`;
 /** dynamic 回退直连专用熔断键：快代理取 IP 失败回退直连后，暂停该平台所有动态账号派发，防本地 IP 连续裸奔。 */
 const DYN_FALLBACK = 'dyn-fallback';
 
+/** 静态出口冷却键：coolKey 已带平台前缀，此处只用 proxyId 标识 IP → 实际键为「平台 + 静态IP」。 */
+const staticProxyKey = (proxyId: number): string => `proxy#${proxyId}`;
+
 /** (平台,键) 是否在冷却/熔断中 */
 export function isCooling(platform: string, ip: string): boolean {
   const until = coolMap.get(coolKey(platform, ip));
@@ -252,6 +269,12 @@ function accountCooldownMs(): number {
 
 function isAccountBusy(accountId: string): boolean {
   return inFlight.has(accountId);
+}
+
+/** 仅清除占用标记（不写冷却/失败计数）：配置类错误导致本轮未真正执行时使用，
+ *  避免账号被 inFlight 永久占住，同时不因配置问题白吃一次冷却。 */
+export function dropInFlight(accountId: string): void {
+  inFlight.delete(accountId);
 }
 
 export interface ReadyCheck {
@@ -286,6 +309,14 @@ export async function allocateAccount(platformId: string): Promise<ReadyCheck> {
       coolingCount++;
       coolingEarliest = Math.min(coolingEarliest, Date.now() + rem * 1000);
       coolDetail.push(`${a.id}(动态回退熔断剩${rem}s)`);
+      continue;
+    }
+    // 静态出口冷却：同一平台同一枚静态 IP 的最小提问间隔（平台+IP 复合键，跨平台互不影响）
+    if (a.ipMode === 'static' && a.proxyId != null && isCooling(platformId, staticProxyKey(a.proxyId))) {
+      const rem = cooldownRemainingSec(platformId, staticProxyKey(a.proxyId));
+      coolingCount++;
+      coolingEarliest = Math.min(coolingEarliest, Date.now() + rem * 1000);
+      coolDetail.push(`${a.id}(静态IP冷却剩${rem}s)`);
       continue;
     }
     candidates.push({ a, nat });
@@ -323,6 +354,13 @@ export async function releaseAccount(platformId: string, accountId: string, succ
   if (acc.ipMode === 'dynamic' && !usedDps) {
     markCooldown(platformId, DYN_FALLBACK, config.dynFallbackSec);
     err(`[cooldown] ${platformId}/${acc.id} 快代理取 IP 失败，回退直连；熔断该平台动态账号 ${config.dynFallbackSec}s`);
+  }
+  // 静态出口冷却：按「平台+代理」打时间戳，防同一枚静态 IP 被本平台账号连续锤（跨平台各自独立）
+  if (acc.ipMode === 'static' && acc.proxyId != null) {
+    markCooldown(platformId, staticProxyKey(acc.proxyId), config.staticIpIntervalSec);
+    console.log(
+      `[cooldown] ${platformId}/proxy#${acc.proxyId} 静态IP冷却 ${config.staticIpIntervalSec}s（平台+IP 维度）`
+    );
   }
   // 账号冷却：释放即写下次可用时刻（区间随机，成败一律），挑号侧按此过滤+排序
   const cooldownSec = Math.round(accountCooldownMs() / 1000);
