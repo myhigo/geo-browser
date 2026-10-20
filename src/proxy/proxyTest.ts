@@ -1,6 +1,7 @@
-// 静态代理连通性测试：用与采集同源的浏览器（系统 Chrome，无头）经代理打开取 IP 页面，
+// 静态代理连通性测试：用与采集同源的浏览器画像（系统 Chrome、有头）经代理打开取 IP 页面，
 // 返回真实出口 IP 与耗时。只验证出口可用性，不读写任何账号 profile。
 import { chromium } from 'playwright';
+import { chromeOptions } from '../browser/launchProfile.js';
 
 export interface ProxyTestInput {
   server: string;
@@ -25,13 +26,8 @@ export async function testProxy(p: ProxyTestInput, timeoutMs = 30_000): Promise<
   let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
   let lastErr = '';
   try {
-    browser = await chromium.launch({
-      channel: 'chrome',
-      headless: true,
-      args: ['--disable-blink-features=AutomationControlled'],
-      ignoreDefaultArgs: ['--enable-automation'],
-      proxy: p,
-    });
+    // 与登录/采集同一份启动画像（系统 Chrome、有头、同一套自动化标记处理），只是不挂 profile
+    browser = await chromium.launch(chromeOptions(p));
     const page = await browser.newPage();
     page.setDefaultTimeout(PAGE_TIMEOUT_MS);
     for (const url of IP_URLS) {

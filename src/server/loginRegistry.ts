@@ -16,7 +16,8 @@ import { proxyRepo, isDirectIp } from '../storage/proxyRepo.js';
 import { paths, config } from '../config/index.js';
 import { err } from '../log.js';
 import { StaticProxyUnavailableError } from '../errors.js';
-import { raiseWindow, nextWindowPosition } from '../windowRaise.js';
+import { raiseWindow } from '../windowRaise.js';
+import { chromeOptions, contextOptions, applyAntiDetect, type ChromeOptions } from '../browser/launchProfile.js';
 
 /** 传给 Playwright 的代理选项（直连/不存在/未启用 → undefined 表示不注入） */
 export type ProxyOpts = { server: string; username?: string; password?: string; bypass?: string };
@@ -69,7 +70,7 @@ export async function assignProxy(
     proxyId == null
       ? '本地IP（直连）'
       : (await proxyRepo().get(proxyId))?.note || (await proxyRepo().get(proxyId))?.host || String(proxyId);
-  return { ok: true, msg: `已关联代理：${label}（更改后需重新登录/重开窗口才生效）` };
+  return { ok: true, msg: `已关联代理：${label}（下轮采集生效）` };
 }
 
 export interface PlatformLoginDriver {
@@ -232,30 +233,36 @@ export async function logoutAccount(platformId: string, accountId: string): Prom
 // ---------- 问答侧：挑号与回写 ----------
 const inFlight = new Set<string>(); // 正在使用的账号（防同号并发）
 
-/** (平台,键) 熔断表：key = "platform:键" → 到期时间戳。
- *  真实出口冷却已由台账字段 nextAvailableAt（账号冷却）取代；现仅存 DYN_FALLBACK 平台熔断（内存态，重启丢失可接受）。 */
+/** (平台,出口 IP) 熔断表：key = "platform:出口IP" → 到期时间戳。
+ *  账号冷却由台账字段 nextAvailableAt 承担；本表负责出口侧约束（内存态，重启丢失可接受）：
+ *  DYN_FALLBACK 动态回退熔断、static 静态 IP 冷却、local 本地 IP 冷却。
+ *  ⚠️ IP 部分一律用真实出口 IP（静态取代理 host、本地固定 127.0.0.1），绝不用 proxyId——
+ *     同一枚 IP 若在台账里被录成两条代理记录，按 proxyId 会各算各的冷却，间隔就管不住了。 */
 const coolMap = new Map<string, number>();
 const coolKey = (platform: string, ip: string): string => `${platform}:${ip}`;
 /** dynamic 回退直连专用熔断键：快代理取 IP 失败回退直连后，暂停该平台所有动态账号派发，防本地 IP 连续裸奔。 */
 const DYN_FALLBACK = 'dyn-fallback';
 
-/** 静态出口冷却键：coolKey 已带平台前缀，此处只用 proxyId 标识 IP → 实际键为「平台 + 静态IP」。 */
-const staticProxyKey = (proxyId: number): string => `proxy#${proxyId}`;
+/** 静态出口标识：代理记录的真实 host（不是 proxyId）；记录已删除时退回 proxy#<id>，至少能挡住该账号自身连续使用。 */
+const egressOfProxy = (proxyId: number, host?: string): string => host?.trim() || `proxy#${proxyId}`;
 
-/** (平台,键) 是否在冷却/熔断中 */
+/** 本地出口标识：本机只有一个出口，固定用回环地址占位（不探测公网 IP，避免给挑号路径引入网络依赖）。 */
+const LOCAL_IP = '127.0.0.1';
+
+/** (平台, 出口IP) 是否在冷却/熔断中（DYN_FALLBACK 也用同一张表，键为平台级） */
 export function isCooling(platform: string, ip: string): boolean {
   const until = coolMap.get(coolKey(platform, ip));
   return until !== undefined && until > Date.now();
 }
 
-/** (平台,键) 冷却剩余秒数 */
+/** (平台, 出口IP) 冷却剩余秒数 */
 export function cooldownRemainingSec(platform: string, ip: string): number {
   const until = coolMap.get(coolKey(platform, ip));
   if (!until) return 0;
   return Math.max(0, Math.ceil((until - Date.now()) / 1000));
 }
 
-/** 标记 (平台,键) 进入冷却（sec 缺省用 platformIpIntervalSec；DYN_FALLBACK 用 dynFallbackSec） */
+/** 标记 (平台, 出口IP) 进入冷却（sec 缺省用 platformIpIntervalSec；DYN_FALLBACK 用 dynFallbackSec） */
 export function markCooldown(platform: string, ip: string, sec?: number): void {
   coolMap.set(coolKey(platform, ip), Date.now() + (sec ?? config.platformIpIntervalSec) * 1000);
 }
@@ -293,6 +300,13 @@ export async function allocateAccount(platformId: string): Promise<ReadyCheck> {
   let coolingCount = 0;
   let coolingEarliest = Number.MAX_SAFE_INTEGER;
   const coolDetail: string[] = [];
+  // 静态出口按真实 IP 归并冷却：代理表一次读全（id→host），循环内不再逐条查库
+  const proxyHostById: Map<number, string> | null = accounts.some((a) => a.ipMode === 'static')
+    ? new Map<number, string>(
+        (await proxyRepo().list().catch(() => [])).map((p): [number, string] => [p.id, p.host])
+      )
+    : null;
+  const staticIpOf = (proxyId: number): string => egressOfProxy(proxyId, proxyHostById?.get(proxyId));
   for (const a of accounts) {
     if (a.status !== 'active' || a.enabled === false || isAccountBusy(a.id) || !fs.existsSync(accountDirOf(a.id))) continue;
     // 账号冷却：nextAvailableAt 为 NULL/undefined（从未跑过）归一为 0 → 最优先
@@ -311,12 +325,23 @@ export async function allocateAccount(platformId: string): Promise<ReadyCheck> {
       coolDetail.push(`${a.id}(动态回退熔断剩${rem}s)`);
       continue;
     }
-    // 静态出口冷却：同一平台同一枚静态 IP 的最小提问间隔（平台+IP 复合键，跨平台互不影响）
-    if (a.ipMode === 'static' && a.proxyId != null && isCooling(platformId, staticProxyKey(a.proxyId))) {
-      const rem = cooldownRemainingSec(platformId, staticProxyKey(a.proxyId));
+    // 静态出口冷却：同一平台同一枚出口 IP 的最小提问间隔（平台+IP 复合键，跨平台互不影响）
+    if (a.ipMode === 'static' && a.proxyId != null) {
+      const ipKey = staticIpOf(a.proxyId);
+      if (isCooling(platformId, ipKey)) {
+        const rem = cooldownRemainingSec(platformId, ipKey);
+        coolingCount++;
+        coolingEarliest = Math.min(coolingEarliest, Date.now() + rem * 1000);
+        coolDetail.push(`${a.id}(静态IP ${ipKey} 冷却剩${rem}s)`);
+        continue;
+      }
+    }
+    // 本地出口冷却：local 账号直连，同平台共用本机出口（固定标识 127.0.0.1）→ 与静态 IP 同规则
+    if ((a.ipMode ?? 'local') === 'local' && isCooling(platformId, LOCAL_IP)) {
+      const rem = cooldownRemainingSec(platformId, LOCAL_IP);
       coolingCount++;
       coolingEarliest = Math.min(coolingEarliest, Date.now() + rem * 1000);
-      coolDetail.push(`${a.id}(静态IP冷却剩${rem}s)`);
+      coolDetail.push(`${a.id}(本地IP ${LOCAL_IP} 冷却剩${rem}s)`);
       continue;
     }
     candidates.push({ a, nat });
@@ -355,11 +380,19 @@ export async function releaseAccount(platformId: string, accountId: string, succ
     markCooldown(platformId, DYN_FALLBACK, config.dynFallbackSec);
     err(`[cooldown] ${platformId}/${acc.id} 快代理取 IP 失败，回退直连；熔断该平台动态账号 ${config.dynFallbackSec}s`);
   }
-  // 静态出口冷却：按「平台+代理」打时间戳，防同一枚静态 IP 被本平台账号连续锤（跨平台各自独立）
+  // 静态出口冷却：按「平台+出口 IP」打时间戳，防同一枚静态 IP 被本平台账号连续锤（跨平台各自独立）
   if (acc.ipMode === 'static' && acc.proxyId != null) {
-    markCooldown(platformId, staticProxyKey(acc.proxyId), config.staticIpIntervalSec);
+    const ipKey = egressOfProxy(acc.proxyId, (await proxyRepo().get(acc.proxyId).catch(() => undefined))?.host);
+    markCooldown(platformId, ipKey, config.staticIpIntervalSec);
     console.log(
-      `[cooldown] ${platformId}/proxy#${acc.proxyId} 静态IP冷却 ${config.staticIpIntervalSec}s（平台+IP 维度）`
+      `[cooldown] ${platformId}/${ipKey} 静态IP冷却 ${config.staticIpIntervalSec}s（平台+IP 维度）`
+    );
+  }
+  // 本地出口冷却：local 账号的出口就是本机，同平台共用 → 与静态 IP 同规则打时间戳
+  if ((acc.ipMode ?? 'local') === 'local') {
+    markCooldown(platformId, LOCAL_IP, config.staticIpIntervalSec);
+    console.log(
+      `[cooldown] ${platformId}/${LOCAL_IP} 本地IP冷却 ${config.staticIpIntervalSec}s（平台+IP 维度）`
     );
   }
   // 账号冷却：释放即写下次可用时刻（区间随机，成败一律），挑号侧按此过滤+排序
@@ -396,37 +429,10 @@ export function loginBusy(): { platformId?: string; accountId?: string } {
   return activeLogin ? { platformId: activeLogin.platformId, accountId: activeLogin.accountId } : {};
 }
 
-function launchOpts(proxy?: ProxyOpts): Parameters<typeof chromium.launchPersistentContext>[1] {
-  const args = ['--disable-blink-features=AutomationControlled'];
-  // 配置了 GEO_WINDOW → 按配置尺寸开窗（与采集窗口统一，且显式几何不受隐藏服务最小化恢复的干扰）；
-  // 位置在基准位上水平级联错开，避免多窗口完全重叠
-  if (config.windowSize) {
-    args.push(`--window-size=${config.windowSize.width},${config.windowSize.height}`);
-    if (config.windowSize.x != null && config.windowSize.y != null) {
-      const pos = nextWindowPosition({
-        x: config.windowSize.x,
-        y: config.windowSize.y,
-        width: config.windowSize.width,
-      });
-      args.push(`--window-position=${pos.x},${pos.y}`);
-    }
-  }
-  const o: Parameters<typeof chromium.launchPersistentContext>[1] = {
-    headless: false,
-    channel: 'chrome',
-    args,
-    ignoreDefaultArgs: ['--enable-automation'],
-    // 不覆写 UA：真实系统 Chrome 的 UA 与 navigator.platform、sec-ch-ua 客户端提示天然一致；
-    // 硬编码假 UA（mac/Chrome124）与真实环境矛盾，属环境伪造特征，会触发平台风控（选图验证永不过）。
-    // viewport null = 关闭视口模拟，页面按真实窗口尺寸渲染，避免固定 1280x800 的模拟痕迹。
-    viewport: null,
-  };
-  if (proxy) {
-    o.proxy = config.proxyBypass
-      ? { ...proxy, bypass: `${config.proxyBypass}, <-loopback>` }
-      : proxy;
-  }
-  return o;
+/** 登录/测试窗口的启动参数：与采集共用同一份画像（browser/launchProfile），恒为有头。
+ *  窗口几何、channel、--enable-automation 处理全由共用模块决定，此处不再自己拼 args。 */
+function launchOpts(proxy?: ProxyOpts): ChromeOptions {
+  return { ...chromeOptions(proxy), ...contextOptions() };
 }
 
 /** launchPersistentContext 容错包装：profile 残留 Chromium 锁（浏览器被 kill/重启后
@@ -450,7 +456,9 @@ async function launchPersistentRetry(
   }
 }
 
-/** 一次性打开目录探测：登录墙 / 登录态判定（登录与测试窗口固定本地 IP，不代理） */
+/** 一次性打开目录探测：登录墙 / 登录态判定（登录与测试窗口固定本地 IP，不代理）。
+ *  启动模式与登录/采集一致（有头）：探测同样带着该账号的 cookie 访问平台，
+ *  换成另一种启动模式去探会把「同一账号两台设备」的痕迹留给风控。 */
 async function openProbe(
   platformId: string,
   dir: string,
@@ -458,18 +466,12 @@ async function openProbe(
 ): Promise<{ ok: boolean; loginRequired?: boolean; error?: string }> {
   let context: BrowserContext;
   try {
-    context = await launchPersistentRetry(dir, { ...launchOpts(proxy), headless: true });
+    context = await launchPersistentRetry(dir, launchOpts(proxy));
   } catch (e) {
     return { ok: false, error: `打开会话失败：${(e as Error).message}` };
   }
   try {
-    await context.addInitScript(() => {
-      try {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
-      } catch {
-        /* ignore */
-      }
-    });
+    await applyAntiDetect(context);
     const page = await context.newPage();
     const def = resolvePlatform(platformId);
     await page.goto(def.defaultUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -479,7 +481,7 @@ async function openProbe(
     // ✅ 登录态判定唯一依据 = 登录凭证（loginCredentialsOf：cookie 匹配 / localStorage 键有值）。
     // 不依赖 DOM 遮挡/输入框（有的平台没有遮罩，元素判定不可靠；用户 2026-09-26 定）。
     // 持久化 cookie 在 launchPersistentContext 时已从磁盘加载；localStorage 随目录持久化，
-    // 无头重开同一目录即可读到。真登录 → 非空 → 已登录；未登录 → 空 → 未登录。
+    // 重开同一目录即可读到。真登录 → 非空 → 已登录；未登录 → 空 → 未登录。
     // 轮询上限：等待磁盘凭证稳定可读（localStorage 在页面加载后才有，需等 SPA 水合）。
     const HYDRATE_MS = 12000;
     const t0 = Date.now();
@@ -490,7 +492,7 @@ async function openProbe(
     }
     const loginRequired = creds.cookies.length === 0 && creds.storageKeys.length === 0;
     if (loginRequired) {
-      // 诊断落盘：无头重开未读到登录凭证 cookie 时，dump 现场排查（cookie 名/localStorage）
+      // 诊断落盘：重开未读到登录凭证 cookie 时，dump 现场排查（cookie 名/localStorage）
       try {
         fs.mkdirSync(paths.diagnosticsRoot, { recursive: true });
         const ts = Date.now();
@@ -592,7 +594,7 @@ export async function loginCredentialsOf(
   return result;
 }
 
-/** 登录后校验：无头重开同一目录，未撞登录墙且可提问 → ok（不抽昵称；2026-09-23 按用户要求简化） */
+/** 登录后校验：重开同一目录，未撞登录墙且可提问 → ok（不抽昵称；2026-09-23 按用户要求简化） */
 async function verifySession(
   platformId: string,
   dir: string,
@@ -695,7 +697,7 @@ export async function startLogin(
       return;
     }
     if (done) {
-      // active 以「磁盘登录态可还原」为准（verifySession = 无头重开同一目录验证登录墙/输入框）。
+      // active 以「磁盘登录态可还原」为准（verifySession = 重开同一目录验证登录墙/输入框）。
       // 不再抽昵称（2026-09-23 按用户要求简化）；文心等无登录墙平台的"磁盘未持久化"兜底
       // 由 confirmLogin 里的会话级 cookie 转持久（重种 365 天）承担。
       const v = await verifySession(platformId, acc.dir);
@@ -709,7 +711,7 @@ export async function startLogin(
           consecutiveFails: 0,
         });
       } else {
-        // 无头探测未通过 → 未登录（用户语义：需重新登录 = 未登录，不新增 failed 状态）
+        // 探测未通过 → 未登录（用户语义：需重新登录 = 未登录，不新增 failed 状态）
         await accountRepo().patch(platformId, acc.id, {
           status: 'none',
           note: `登录态校验未通过：${v.note ?? ''}`,
@@ -736,7 +738,7 @@ export async function confirmLogin(platformId: string, accountId: string): Promi
     if (pg) {
       // 窗口内真实登录态判定（不弹提示框）：唯一依据 = 窗口内能否读到登录凭证（cookie/localStorage）。
       // 已登录才重种 cookie 落盘；未登录 → 不重种（重种匿名 cookie 会把无登录态误持久化，
-      // 导致无头重开被误判已登录），由收尾 verifySession 无头探测做最终裁决，未通过回写 none。
+      // 导致重开被误判已登录），由收尾 verifySession 探测做最终裁决，未通过回写 none。
       let windowLoggedIn = false;
       try {
         const creds = await loginCredentialsOf(pg.context(), pg, platformId);
@@ -782,7 +784,7 @@ export async function confirmLogin(platformId: string, accountId: string): Promi
       }
       // 🍪 会话级登录 cookie 转持久：仅在窗口内判定已登录时执行。
       // 未登录时窗口里只有匿名 cookie（ttwid/csrf/bd_sso 追踪等），一旦重种持久化，
-      // 无头重开会误认为"已有会话"不弹登录墙 → verifySession 误判已登录。
+      // 重开会误认为"已有会话"不弹登录墙 → verifySession 误判已登录。
       // 因此未登录（windowLoggedIn=false）一律不重种，交给收尾探测裁决。
       if (windowLoggedIn) {
         try {
@@ -930,16 +932,8 @@ export async function testAccount(
   } catch (e) {
     return { ok: false, msg: `打开测试窗口失败：${(e as Error).message}` };
   }
-  // 隐藏自动化特征，免得平台把手动窗口当成脚本
-  void context
-    .addInitScript(() => {
-      try {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
-      } catch {
-        /* ignore */
-      }
-    })
-    .catch(() => {});
+  // 反自动化注入：与采集窗口共用同一份（browser/launchProfile）
+  void applyAntiDetect(context);
   const def = resolvePlatform(platformId);
   const page = context.pages()[0] || (await context.newPage());
   // 有头窗口：恢复置前（Windows 下后台服务拉起的窗口会继承隐藏态被最小化）

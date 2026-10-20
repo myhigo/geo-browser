@@ -46,12 +46,6 @@ const num = (k: string, d: number): number => {
   return Number.isFinite(n) ? n : d;
 };
 
-const bool = (k: string, d: boolean): boolean => {
-  const v = env(k);
-  if (v === undefined) return d;
-  return v === '1' || v.toLowerCase() === 'true';
-};
-
 /** 账号冷却区间解析：GEO_ACCOUNT_INTERVAL_SEC 支持 "120-300"（区间随机）或 "180"（单值固定） */
 const intervalRange = (k: string, d: string): { min: number; max: number } => {
   const raw = env(k) ?? d;
@@ -129,13 +123,11 @@ export interface AppConfig {
   artifactMode: ArtifactMode;
   /** 浏览器窗口尺寸/位置（GEO_WINDOW=宽,高[,X,Y]）：设置后登录/测试/采集窗口统一按此开；不设走浏览器默认 */
   windowSize?: { width: number; height: number; x?: number; y?: number };
-  /** 采集是否无头（登录窗口恒为有头） */
-  headless: boolean;
   /** 代理 IP 冷却间隔（秒）：同一 IP 用完后需等待该时长才能再次被分配（默认 120） */
   ipIntervalSec: number;
   /** (平台,IP) 冷却间隔（秒）：真实出口冷却已由账号冷却取代，现仅作 markCooldown 的默认时长 */
   platformIpIntervalSec: number;
-  /** 静态出口冷却（秒）：同一平台同一枚静态 IP 两次提问的最小间隔（默认 30） */
+  /** 出口冷却（秒）：同一平台同一枚出口 IP（静态代理 / 本地直连）两次提问的最小间隔（默认 30） */
   staticIpIntervalSec: number;
   /** 账号冷却区间（秒）：账号释放后到下次可被挑选的等待时长，区间内随机取值
    *  （GEO_ACCOUNT_INTERVAL_SEC=120-300 区间随机，或 180 单值固定；默认 120-300） */
@@ -154,10 +146,8 @@ export interface AppConfig {
   ipLeaseMs: number;
   /** 有状态数据的根目录；默认当前工作目录（保持与重构前一致） */
   dataRoot: string;
-  /** 显式指定 Chrome 可执行文件路径（不指定则用 Playwright 自带 chromium） */
+  /** 显式指定 Chrome 可执行文件路径（不指定则用系统 Chrome） */
   chromePath?: string;
-  /** 是否调用系统安装的 Chrome（本机开发用；容器里应保持 false 走自带 chromium） */
-  useSystemChrome: boolean;
   /** 代理 bypass 域名（逗号分隔）：这些域名直连、不走代理出口（用于把静态资源甩给直连带宽） */
   proxyBypass: string;
   /** noVNC 页面地址，/admin 内嵌用（建议走反向代理保持同源）；留空则不显示登录窗口面板 */
@@ -232,7 +222,6 @@ export const config: AppConfig = {
   },
   artifactMode: env('GEO_ARTIFACT_MODE') === 'debug' ? 'debug' : 'none',
   windowSize: windowSize('GEO_WINDOW'),
-  headless: bool('GEO_HEADLESS', true),
   ipIntervalSec: num('GEO_IP_INTERVAL', 120),
   platformIpIntervalSec: num('GEO_PLATFORM_IP_INTERVAL', 120),
   staticIpIntervalSec: num('GEO_STATIC_IP_INTERVAL_SEC', 30),
@@ -245,7 +234,6 @@ export const config: AppConfig = {
   ipLeaseMs: 5 * 60 * 1000,
   dataRoot: env('GEO_DATA_ROOT') ?? '.',
   chromePath: env('GEO_CHROME_PATH'),
-  useSystemChrome: bool('GEO_USE_SYSTEM_CHROME', false),
   proxyBypass: env('GEO_PROXY_BYPASS') ?? '',
   novncUrl: env('GEO_NOVNC_URL') ?? defaultNovncUrl(basePath),
   testOutDir: env('GEO_TEST_OUT_DIR') ?? '',
@@ -292,7 +280,6 @@ export function describeConfig(): string {
     `basePath=${config.basePath || '/'}`,
     `port=${config.port}`,
     `artifactMode=${config.artifactMode}`,
-    `headless=${config.headless}`,
     `dataRoot=${path.resolve(config.dataRoot)}`,
   ];
   if (config.pullHost) bits.push(`pullHost=${config.pullHost}`);

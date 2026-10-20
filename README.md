@@ -16,24 +16,21 @@ GEO 网页模拟收录监测的 **V1 平台采集诊断工具（平台探针）*
 cd geo-browser
 npm install
 # 浏览器二选一：
-npx playwright install chromium   # 方式A：用 Playwright 自带 chromium（mac12 等旧系统会失败）
+npx playwright install chromium   # 仅容器/无本机 Chrome 时才需要（程序默认用系统 Chrome）
 ```
 
-### 用本机已安装的 Chrome（推荐，免去下载）
-mac12 等旧系统 `npx playwright install chromium` 会失败（新版 Playwright 已不再支持）。
-此时直接用系统 Chrome 即可，无需下载任何浏览器：
+### 浏览器：固定使用本机已安装的 Chrome
+程序在本机运行，默认就调用系统 Chrome（`channel: 'chrome'`），**不需要任何开关、也不下载浏览器**：
 
 ```bash
-# 方式B：加 --chrome 让 Playwright 调用本机 Chrome
-npm run dev -- --chrome
+npm run dev
 
-# 或显式指定路径（任意一种都行）：
+# 仅当 Chrome 不在默认安装位置时才需要显式指定路径：
 GEO_CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm run dev
-GEO_USE_SYSTEM_CHROME=1 npm run dev
 ```
 
 > 前提：本机已安装 Google Chrome（普通版即可，不是 Chrome for Testing）。
-> 用 `--chrome` 时 Playwright 通过 `channel: 'chrome'` 自动定位系统 Chrome，不下载任何文件。
+> 所有入口（登录 / 采集 / 登录态探测 / 代理测试）一律**有头**打开，没有无头模式。
 
 ### 关于视频
 本工具**不录制视频**。GEO 收录监测只需截图留证 + DOM 结构分析，录屏无意义，故不引入 ffmpeg 依赖。
@@ -63,13 +60,15 @@ npm run dev -- --chrome --platform doubao --profile
 | `--question <文本>` | 要提的问题 | 内置医疗 AI 问题 |
 | `--platform <id>` | 平台 id：`doubao` / `wenxin` / `qianwen` | `doubao` |
 | `--url <地址>` | 覆盖平台默认入口（便于指向具体聊天页） | 平台自带 |
-| `--chrome` | 用本机已安装的 Chrome（免下载 chromium） | 关 |
+| `--chrome` | 兼容保留（程序已固定使用系统 Chrome，此参数不再有作用） | 固定开 |
 | `--profile [目录]` | **持久登录 profile**，复用真实登录会话 | 关（匿名） |
 | `--wait-login <秒>` | 检测到未登录时等待人工登录的秒数，`0` = 不等待 | `300` |
 | `--screenshot-mode <模式>` | 长屏截图策略：`expand` / `stitch` | `expand` |
 
-环境变量等价写法：`GEO_USE_SYSTEM_CHROME=1`、`GEO_CHROME_PATH=...`、
-`GEO_PROFILE_DIR=...`、`GEO_HEADLESS=1`。
+环境变量等价写法：`GEO_CHROME_PATH=...`、`GEO_PROFILE_DIR=...`。
+
+> 所有入口（登录 / 采集 / 登录态探测 / 代理测试）一律使用系统 Chrome 且为**有头**模式，没有无头开关：
+> 无头会把 UA 变成 `HeadlessChrome`、窗口变成 800x600，与登录时的设备特征不一致。
 
 ### 登录 profile（需要登录的平台用这个）
 匿名跑不通的平台（实测豆包会触发风控），改用持久 profile：人工登录一次，之后一直复用。

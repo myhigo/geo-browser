@@ -151,7 +151,6 @@ async function releaseIdentity(platform: string, loginRequired: boolean): Promis
 export async function execute(
   platform: string,
   keyword: string,
-  headed: boolean,
   accountId?: string
 ): Promise<{ screenshot: string; answer: string; sources: { title: string; url: string; siteName: string }[] }> {
   let userDataDir: string | undefined = path.join(paths.profilesRoot, platform);
@@ -188,7 +187,7 @@ export async function execute(
   } else if (reactive) {
     userDataDir = QWEN_PROFILE_DIR;
   } else {
-    waitLoginMs = headed ? 120_000 : 0; // 登录态平台：有头窗口内等人工登录
+    waitLoginMs = 120_000; // 登录态平台：有头窗口内等人工登录
   }
   // 采集出口：按账号 ipMode 决定。static→绑定静态代理；local→直连；dynamic→run.ts 按「账号↔IP」绑定取 IP。
   // 登录/测试窗口固定本地 IP（见 loginRegistry），此处仅约束采集出口。
@@ -213,9 +212,7 @@ export async function execute(
   try {
     result = await runDiagnostic(keyword, {
       platform,
-      useSystemChrome: true,
       userDataDir,
-      headless: !headed,
       waitLoginMs,
       proxy: collectProxy,
       dynamic: useDynamic,
@@ -253,9 +250,7 @@ export async function execute(
       await resetQwenIdentity('撞登录墙，重置匿名身份并自动重试一次');
       result = await runDiagnostic(keyword, {
         platform,
-        useSystemChrome: true,
         userDataDir: QWEN_PROFILE_DIR,
-        headless: !headed,
         waitLoginMs: 0,
       });
     } else if (result.answerText) {
@@ -324,7 +319,6 @@ app.post('/api/web-collect', (req, res) => {
   const rawPlatform = typeof body.platform === 'string' ? body.platform.toLowerCase().trim() : '';
   const platform = rawPlatform;
   const keyword = typeof body.keyword === 'string' ? body.keyword.trim() : '';
-  const headed = body.headed === true;
 
   if (!platform || !PLATFORMS[platform]) {
     res
@@ -338,7 +332,7 @@ app.post('/api/web-collect', (req, res) => {
   }
 
   enqueue(platform, async () => {
-    const data = await withTimeout(execute(platform, keyword, headed));
+    const data = await withTimeout(execute(platform, keyword));
     res.status(200).json(data);
   }).catch((e: unknown) => {
     if (res.headersSent) return;
@@ -396,7 +390,6 @@ interface PullRoundOpts {
   forced?: string[];
   startTime?: string;
   endTime?: string;
-  headed: boolean;
   source: 'manual' | 'daily';
 }
 
@@ -421,10 +414,10 @@ function launchPullRound(o: PullRoundOpts): void {
     return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   };
   console.log(
-    `[${stamp()}] [pull] 触发（${o.source}）：host=${o.host} headless=${!o.headed} platform=${o.forced ? o.forced.join(',') : 'auto(全部启用)'} startTime=${o.startTime ?? '-'} endTime=${o.endTime ?? '-'}`
+    `[${stamp()}] [pull] 触发（${o.source}）：host=${o.host} platform=${o.forced ? o.forced.join(',') : 'auto(全部启用)'} startTime=${o.startTime ?? '-'} endTime=${o.endTime ?? '-'}`
   );
-  // execute 自带平台身份策略（千问撞墙重生 / 文心轮换）；headed 由本轮请求决定
-  runPullRound(cfg, (platform, keyword, accountId) => execute(platform, keyword, o.headed, accountId), o.forced, (line) => console.log(line), pullSignal)
+  // execute 自带平台身份策略（千问撞墙重生 / 文心轮换）
+  runPullRound(cfg, (platform, keyword, accountId) => execute(platform, keyword, accountId), o.forced, (line) => console.log(line), pullSignal)
     .then((s) => {
       pullStatus.running = false;
       pullStatus.finishedAt = Date.now();
@@ -475,7 +468,6 @@ function startDailyPull(): void {
     startDay.setDate(startDay.getDate() - config.pullDaysBack);
     launchPullRound({
       host: normalizeHost(envPullHost) || envPullHost,
-      headed: false,
       startTime: `${dateKey(startDay)} 00:00:00`,
       endTime: `${dateKey(today0)} 00:00:00`,
       source: 'daily',
@@ -531,9 +523,8 @@ app.post('/api/pull/run', (req, res) => {
     res.status(400).json({ msg: `${badTime[0]} 格式不正确：应为 yyyy-MM-dd 或 yyyy-MM-dd HH:mm:ss，当前「${badTime[1]}」` });
     return;
   }
-  const headed = body.headed === true; // 默认无头；需要人工盯/首次登录等场景传 true
   res.status(202).json({ msg: 'pull 轮次已开始，进度见 GET /api/pull/status 与服务日志' });
-  launchPullRound({ host, forced, startTime, endTime, headed, source: 'manual' });
+  launchPullRound({ host, forced, startTime, endTime, source: 'manual' });
 });
 
 // 手动中断正在运行的 pull 轮次：置中断信号，runPullRound 在分页/逐词节点检测后停止（已在途的并发采集会跑完）
@@ -584,16 +575,15 @@ app.post('/api/source-analysis/run', (req, res) => {
     res.status(400).json({ msg: `没有匹配的平台，可选：${ENABLED_PLATFORMS.join(', ')}` });
     return;
   }
-  const headed = body.headed === true; // 默认无头
   const name = typeof body.name === 'string' ? body.name : undefined;
   const mode: 'serial' | 'parallel' = body.mode === 'parallel' ? 'parallel' : 'serial';
   const status = createAnalysisStatus(keywords, platforms, name, mode);
   analysisStatus = status;
   res.status(202).json({ msg: '信源分析已开始，进度见 GET /api/source-analysis/status', taskId: status.taskId });
   console.log(
-    `[信源分析] 触发：taskId=${status.taskId} 模式=${mode} 词数=${keywords.length} 平台=${platforms.map((p) => p.modelId).join(',')} headless=${!headed}`
+    `[信源分析] 触发：taskId=${status.taskId} 模式=${mode} 词数=${keywords.length} 平台=${platforms.map((p) => p.modelId).join(',')}`
   );
-  runSourceAnalysis(status, keywords, (p, kw) => execute(p, kw, headed), (p) => p, (l) =>
+  runSourceAnalysis(status, keywords, (p, kw) => execute(p, kw), (p) => p, (l) =>
     console.log(`[信源分析] ${l}`)
   ).catch((e: unknown) => {
     status.running = false;
@@ -776,8 +766,8 @@ app.post('/api/accounts/:platform', async (req, res) => {
   });
 });
 
-// 账号绑定 / 解绑静态代理：绑定或换绑后账号必须重新登录（旧登录态归属旧出口，换出口即失效）
-// 解绑（proxyId=null）= 不绑静态代理，出口由账号 ipMode 决定。
+// 账号绑定 / 解绑静态代理：只换出口，不影响登录态（登录 cookie 与出口 IP 无关，2026-10-19 用户定）。
+// 解绑（proxyId=null）= 不绑静态代理，出口由账号 ipMode 决定；下轮采集按新出口生效。
 app.post('/api/accounts/:platform/:accountId/proxy', async (req, res) => {
   const platform = String(req.params.platform).toLowerCase();
   const accountId = String(req.params.accountId);
@@ -796,10 +786,9 @@ app.post('/api/accounts/:platform/:accountId/proxy', async (req, res) => {
         proxyId: undefined,
         proxyHost: undefined,
         proxyPort: undefined,
-        status: 'none',
-        note: `已解除代理绑定（${acc.proxyHost ?? '-'}），需重新登录`,
+        note: undefined,
       });
-      res.status(200).json({ ok: true, msg: '已解绑，该账号需重新登录' });
+      res.status(200).json({ ok: true, msg: '已解绑（下轮采集改走账号出口模式）' });
       return;
     }
     if (!Number.isInteger(proxyId)) {
@@ -819,10 +808,9 @@ app.post('/api/accounts/:platform/:accountId/proxy', async (req, res) => {
       proxyId,
       proxyHost: ip.host,
       proxyPort: ip.port,
-      status: 'none',
-      note: `已绑定代理 ${ip.host}:${ip.port}（${ip.protocol}），需重新登录`,
+      note: `已绑定代理 ${ip.host}:${ip.port}（${ip.protocol}）`,
     });
-    res.status(200).json({ ok: true, msg: `已绑定 ${ip.host}:${ip.port}，该账号需重新登录` });
+    res.status(200).json({ ok: true, msg: `已绑定 ${ip.host}:${ip.port}（下轮采集生效）` });
   } catch (e) {
     res.status(500).json({ msg: `绑定失败：${(e as Error).message}` });
   }
@@ -854,7 +842,17 @@ app.post('/api/accounts/:platform/:accountId/ip-mode', async (req, res) => {
       }
     }
     const patch: Partial<Account> = { ipMode: ipMode as 'local' | 'static' | 'dynamic' };
-    if (ipMode !== 'static') patch.proxyId = undefined; // local/dynamic 时清空 proxyId
+    if (ipMode !== 'static') {
+      // 切离静态出口：代理绑定三件套一起清空，否则卡片只清了 ip 模式、
+      // 却还挂着「已绑定代理 x.x.x.x」的 host/note，看起来像仍在走静态 IP
+      patch.proxyId = undefined;
+      patch.proxyHost = undefined;
+      patch.proxyPort = undefined;
+      // note 只清代理绑定/解绑这两类提示，登录失败等其它备注保留
+      if (acc.note?.startsWith('已绑定代理') || acc.note?.startsWith('已解除代理绑定')) {
+        patch.note = undefined;
+      }
+    }
     await accountRepo().patch(platform, accountId, patch);
     res.status(200).json({ ok: true, msg: '切换成功' });
   } catch (e) {

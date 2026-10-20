@@ -180,7 +180,10 @@ function renderAccounts(){
         + (a.ipMode==='static'?'<div class="acc-row"><span class="k">代理</span>'+proxySelHtml(a)+'</div>':'')
         // 第五行：连续失败（有才显示）
         + (a.consecutiveFails?'<div class="acc-fail"><span class="k">连续失败</span><b>'+a.consecutiveFails+'</b></div>':'');
-      if(a.note) accHtml += '<div class="note">'+esc(a.note)+'</div>';
+      // 备注：代理绑定类提示只在 static 下有意义，切走静态出口后不再展示（历史脏数据兜底）
+      var noteText = a.note || '';
+      if(a.ipMode!=='static' && noteText.indexOf('已绑定代理')===0) noteText = '';
+      if(noteText) accHtml += '<div class="note">'+esc(noteText)+'</div>';
       // 第一行：主操作（登录/验证/取消登录 + 退出）
       accHtml += '<div class="btns">';
       if(a.status==='waiting') {
@@ -338,8 +341,7 @@ function renderSources(){
     + '<label style="margin-right:16px;"><input type="radio" name="sa-mode" value="serial" checked> 串行</label>'
     + '<label><input type="radio" name="sa-mode" value="parallel"> 并行</label>'
     + '</div>'
-    + '<div class="btns"><button class="primary" id="sa-go">▶ 开始分析</button><button id="sa-refresh">刷新状态</button>'
-    + '<label style="font-size:13px;color:#4e5969;"><input type="checkbox" id="sa-headed" checked> 开启浏览器</label></div>'
+    + '<div class="btns"><button class="primary" id="sa-go">▶ 开始分析</button><button id="sa-refresh">刷新状态</button></div>'
     + '<div id="sa-status" class="meta" style="margin-top:12px;">加载状态…</div></div>'
     + '<div id="sa-history"></div>';
   fetch('/api/platforms').then(function(r){ return r.json(); }).then(function(d){
@@ -358,7 +360,6 @@ function renderSources(){
     var name = $('#sa-name').value.trim();
     var payload = { keywords: kw, platforms: plats };
     if(name) payload.name = name;
-    if($('#sa-headed').checked) payload.headed = true;
     var mEl = document.querySelector('input[name="sa-mode"]:checked');
     payload.mode = mEl ? mEl.value : 'serial';
     fetch('/api/source-analysis/run', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload) })
@@ -441,7 +442,6 @@ function renderPull(){
     + '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;width:100%;margin:2px 0 6px;">'
     + '<input id="pull-start" class="inp" style="width:190px;" value="'+defStart+'">'
     + '<input id="pull-end" class="inp" style="width:190px;" value="'+defEnd+'">'
-    + '<label style="font-size:13px;color:#4e5969;"><input type="checkbox" id="pull-headed" checked> 开启浏览器</label>'
     + '</div>'
     + '</div>'
     + '<div class="btns"><button class="primary" id="pull-go" disabled>▶ 运行</button><button id="pull-stop" disabled>■ 停止</button><button id="pull-refresh">刷新状态</button></div>'
@@ -459,7 +459,6 @@ function renderPull(){
     var payload = { platforms: plats };
     var s1 = $('#pull-start').value.trim(); if(s1) payload.startTime = s1;
     var s2 = $('#pull-end').value.trim(); if(s2) payload.endTime = s2;
-    if($('#pull-headed').checked) payload.headed = true;
     fetch('/api/pull/run', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload) })
       .then(function(r){ return r.json().catch(function(){ return {msg:'响应解析失败'}; }); })
       .then(function(j){ toast((j&&j.msg)||'已提交'); pullStatusTick(); });

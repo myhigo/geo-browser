@@ -38,8 +38,12 @@ GEO_DPS_ACCOUNTS_PER_IP=2
 # 同时持有 IP 数上限（默认 5 = 平台数）：达到上限说明配额/清理逻辑有问题，正常不该出现
 GEO_DPS_MAX_IPS=5
 
-# 用系统 Chrome（本地版开）；容器版关
-GEO_USE_SYSTEM_CHROME=1
+# 浏览器：本机运行 → 固定使用系统 Chrome + 有头窗口（登录/采集/登录态探测/代理测试同一份画像），
+# 没有无头模式，也不需要任何开关。仅当 Chrome 不在默认位置时才配 GEO_CHROME_PATH。
+# GEO_CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe
+
+# 浏览器窗口几何（宽,高[,X,Y]）：登录/采集/探测统一按此开窗并级联错开；不设则 Windows 下最大化
+# GEO_WINDOW=1052,1047,376,0
 
 
 # 页面就绪等待（毫秒）：goto 导航上限 + 豆包发送双道就绪门（打字前等输入区挂载、打字后等按钮启用）
@@ -52,7 +56,7 @@ GEO_ANSWER_TIMEOUT_MS=300000
 # 账号冷却区间（秒）：账号释放后到下次可被挑选的等待时长，区间内随机取值（也可写单值如 180 固定）
 GEO_ACCOUNT_INTERVAL_SEC=120-300
 
-# 静态出口冷却（秒）：同一平台同一枚静态 IP 两次提问的最小间隔（平台+IP 维度，默认 30）
+# 出口冷却（秒）：同一平台同一枚出口 IP 两次提问的最小间隔，静态代理与本地直连同一规则（平台+IP 维度，默认 30）
 GEO_STATIC_IP_INTERVAL_SEC=30
 
 # 动态回退直连熔断（秒）：快代理取 IP 失败回退直连后，该平台动态账号暂停派发的时长

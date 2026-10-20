@@ -26,7 +26,7 @@ geo-browser 部署说明（本地 Chrome 版）
   GEO_DATA_ROOT        数据目录（账号 profile/截图/信源分析产物），默认 ../geo-browser-data（项目外，避免误传仓库）
   GEO_ARTIFACT_MODE    debug=落盘截图/存档；none=不落盘
   PORT                 服务端口（默认 8787）
-  GEO_USE_SYSTEM_CHROME 1=用系统 Chrome（本地版默认）；0=用 Playwright 自带
+  GEO_CHROME_PATH      仅当 Chrome 不在默认位置时指定；不配则用系统 Chrome（固定有头，无无头模式）
   DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME  MySQL 配置（必填）
 
 五、账号数据

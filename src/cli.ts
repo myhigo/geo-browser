@@ -25,8 +25,6 @@ async function main(): Promise<void> {
   const question =
     qi >= 0 && args[qi + 1] ? args[qi + 1] : '请介绍一下人工智能在医疗领域有哪些应用？';
 
-  // 用本机已安装的 Chrome，避免 Playwright 自带 chromium（mac12 等旧系统无法下载）
-  const useSystemChrome = args.includes('--chrome') || process.env.GEO_USE_SYSTEM_CHROME === '1';
   const executablePath = process.env.GEO_CHROME_PATH || undefined;
 
   // 目标平台（默认 doubao；文心用 --platform wenxiaoyan）
@@ -96,7 +94,6 @@ async function main(): Promise<void> {
   }
 
   const result = await runDiagnostic(question, {
-    useSystemChrome,
     executablePath,
     platform,
     url,

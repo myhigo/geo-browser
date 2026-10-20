@@ -8,7 +8,8 @@ import { DiagnosticResult, ElementDiagnosisItem, SourceInfo, ScreenshotMode } fr
 import { paths, config } from '../config/index.js';
 import { CaptchaBlockedError, SendNotConfirmedError } from '../errors.js';
 import { acquireIpForAccount, discardIp } from '../proxy/dpsProxy.js';
-import { raiseWindow, nextWindowPosition } from '../windowRaise.js';
+import { raiseWindow } from '../windowRaise.js';
+import { chromeOptions, contextOptions, applyAntiDetect } from '../browser/launchProfile.js';
 
 // 浏览器拉起串行（2026-10-16 用户定）：一个拉起完成后再拉起下一个，避免同时冲击代理与网络。
 // 并发上限本身由调度器保证（≤ 平台数、同平台严格串行），这里只是把「拉起」这一步排成队列。
@@ -101,9 +102,7 @@ async function writeReport(root: string, r: DiagnosticResult, label: string): Pr
 }
 
 export interface LaunchOpts {
-  /** 使用本机已安装的 Chrome（channel:'chrome'），跳过 Playwright 自带 chromium 下载 */
-  useSystemChrome?: boolean;
-  /** 显式指定 Chrome 可执行文件路径（优先级高于 useSystemChrome） */
+  /** 显式指定 Chrome 可执行文件路径（优先于 GEO_CHROME_PATH 与系统 Chrome） */
   executablePath?: string;
   /** 目标平台 id（默认 doubao），见 src/platforms/index.ts 的 PLATFORMS */
   platform?: string;
@@ -125,8 +124,6 @@ export interface LaunchOpts {
    * 只在 userDataDir 存在时才有意义——匿名上下文关掉就丢，等了也白等。
    */
   waitLoginMs?: number;
-  /** 无头模式；缺省时由环境变量 GEO_HEADLESS 决定 */
-  headless?: boolean;
   /** 代理（真实走代理出口，防风控）：server 形如 http://host:port 或 socks5://host:port */
   proxy?: { server: string; username?: string; password?: string };
   /** 出口模式=动态（按账号 ipMode 设置）：开浏览器前按「账号↔IP」绑定取出口 IP；失败回退到 proxy（静态/直连） */
@@ -165,7 +162,6 @@ async function runDiagnosticScoped(
   // 诊断产物开关：debug 才落盘截图/HAR/HTML 现场与诊断报告；生产（none）只产出交付物（05 产品图）与结构化结果。
   const dbg = config.artifactMode === 'debug';
 
-  const headless = opts.headless ?? process.env.GEO_HEADLESS === '1';
   // 动态出口（按账号 ipMode=dynamic）：开浏览器前按「账号↔IP」绑定取得出口 IP——有绑定且未到期即复用，
   // 到期/无绑定则在本平台配额内并入或新建（见 proxy/dpsProxy.ts）。取不到回退传入的静态代理/直连，
   // 由账号释放路径记平台熔断，防本地 IP 连续裸奔。
@@ -191,52 +187,9 @@ async function runDiagnosticScoped(
       }
     }
   }
-  const launchOpts: {
-    headless: boolean;
-    slowMo: number;
-    channel?: string;
-    executablePath?: string;
-    args?: string[];
-    ignoreDefaultArgs?: string[];
-    proxy?: { server: string; username?: string; password?: string; bypass?: string };
-  } = {
-    headless,
-    slowMo: headless ? 0 : 20, // headless 模式下不刻意放慢；非 headless 用于人工可视监控
-    // 去掉 navigator.webdriver 等明显的自动化特征，降低被风控误判的概率。
-    // ⚠️ 仅消除"我是脚本"的标记，**不绕过**任何验证码/登录/风控——该登录的照样人工登录。
-    // 窗口几何：配置了 GEO_WINDOW → 按配置尺寸开窗（与登录/测试窗口统一），位置水平级联错开；
-    // 未配置 → 维持原状：Windows 强制最大化打开（后台进程拉起的窗口常被最小化），mac 原生置前即可。
-    args: (() => {
-      if (config.windowSize) {
-        const pos =
-          config.windowSize.x != null && config.windowSize.y != null
-            ? nextWindowPosition({
-                x: config.windowSize.x,
-                y: config.windowSize.y,
-                width: config.windowSize.width,
-              })
-            : null;
-        return [
-          '--disable-blink-features=AutomationControlled',
-          `--window-size=${config.windowSize.width},${config.windowSize.height}`,
-          ...(pos ? [`--window-position=${pos.x},${pos.y}`] : []),
-        ];
-      }
-      return process.platform === 'win32'
-        ? ['--disable-blink-features=AutomationControlled', '--start-maximized']
-        : ['--disable-blink-features=AutomationControlled'];
-    })(),
-    // 去掉 Playwright 默认注入的 --enable-automation（会留下 cdc_ 钩子与 webdriver 标记）
-    ignoreDefaultArgs: ['--enable-automation'],
-    ...(proxy
-      ? { proxy: config.proxyBypass ? { ...proxy, bypass: `${config.proxyBypass}, <-loopback>` } : proxy }
-      : {}),
-  };
-  if (opts.executablePath) {
-    launchOpts.executablePath = opts.executablePath;
-  } else if (opts.useSystemChrome) {
-    launchOpts.channel = 'chrome';
-  }
+  // 启动参数统一由 browser/launchProfile 提供：与登录窗口、登录态探测共用同一份，
+  // 保证同一账号登录与采集时呈现同一台设备（窗口几何/channel/有头模式/自动化标记处理全部一致）。
+  const launchOpts = chromeOptions(proxy, opts.executablePath);
   const stamp = ts(); // YYYY-MM-DD_HH-MM-SS（报告内时间字段）
   // 样本目录规则（2026-09-02 用户定）：diagnostics/<平台>/<日>/<时间点>-<查询名称>
   const [day, time] = stamp.split('_');
@@ -253,12 +206,9 @@ async function runDiagnosticScoped(
   const dirN = path.join(root, 'network');
   [dirS, dirP, dirN].forEach((d) => fs.mkdirSync(d, { recursive: true }));
 
+  // 上下文选项与登录窗口共用（关闭视口模拟、禁止下载）；debug 模式额外录制 HAR
   const contextOpts: Parameters<Browser['newContext']>[0] = {
-    // viewport null = 关闭视口模拟，页面按真实窗口尺寸渲染（截图走 fullPage/滚动拼接，不依赖固定尺寸）。
-    // 不覆写 UA：真实系统 Chrome 的 UA 与 navigator.platform、sec-ch-ua 客户端提示天然一致；
-    // 硬编码假 UA（mac/Chrome124）与真实环境矛盾，属环境伪造特征，会触发平台风控。
-    viewport: null,
-    acceptDownloads: false, // 不触发任何下载行为，避免系统下载条/对话框
+    ...contextOptions(),
     ...(dbg ? { recordHar: { path: path.join(dirN, 'network.har') } } : {}),
   };
   // 登录态：给了 profile 目录就走持久上下文（登录态落盘，下次复用）；否则仍是临时匿名上下文。
@@ -278,49 +228,13 @@ async function runDiagnosticScoped(
       return { browser: b, context: await b.newContext(contextOpts) };
     }
   );
-  // 反自动化指纹脚本：在每一个新文档（含跨域 iframe）最早时机注入，
-  // 抹掉 webdriver 标记并补全几处真实桌面浏览器应有的字段，降低阿里等风控的环境判定。
-  // ⚠️ 只是"看起来像真人浏览器"，**不破解/不绕过**任何验证码或登录。
-  await context
-    .addInitScript(() => {
-      try {
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
-      } catch {
-        /* ignore */
-      }
-      try {
-        Object.defineProperty(navigator, 'languages', {
-          get: () => ['zh-CN', 'zh', 'en'],
-          configurable: true,
-        });
-      } catch {
-        /* ignore */
-      }
-      try {
-        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
-      } catch {
-        /* ignore */
-      }
-      try {
-        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8, configurable: true });
-      } catch {
-        /* ignore */
-      }
-      try {
-        // 预留滚动条槽位：滚动条出现/消失引起的布局宽度变化是「页面猛的一缩」抖动的根源
-        const st = document.createElement('style');
-        st.textContent = 'html{scrollbar-gutter:stable;}';
-        (document.head || document.documentElement).appendChild(st);
-      } catch {
-        /* ignore */
-      }
-    })
-    .catch(() => {});
+  // 反自动化注入与登录窗口共用同一份（browser/launchProfile）
+  await applyAntiDetect(context);
   // 持久上下文（launchPersistentContext，走台账/登录 profile 时）自带一个初始空白标签页，
   // 直接复用它，避免出现「一个 blank + 一个业务页」两个标签。
   const page: Page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
-  // 有头模式：恢复窗口并置前（Windows 上窗口可能最小化且不压其他应用；mac 原生就会置前，此处等价补强）
-  if (!headless) await raiseWindow(browser, context, page);
+  // 始终有头：恢复窗口并置前（Windows 上窗口可能最小化且不压其他应用；mac 原生就会置前，此处等价补强）
+  await raiseWindow(browser, context, page);
   // 打印目录，便于排查「发送后弹出访达窗口」现象：对比访达标题栏路径是否与下面一致
   log(`📂 工作目录：${process.cwd()}`);
   log(`📂 本次样本库目录：${root}`);
